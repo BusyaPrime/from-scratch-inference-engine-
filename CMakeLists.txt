@@ -30,6 +30,16 @@ if(ENGINE_ENABLE_CUDA)
     # Kernel sources and cuBLAS linkage land in Phase 4.
 endif()
 
+# Python binding module. Built whenever pybind11 is available, which is always
+# true under a scikit-build-core / pip build; a bare cmake configure skips it.
+set(PYBIND11_FINDPYTHON ON)
+find_package(pybind11 CONFIG QUIET)
+if(pybind11_FOUND)
+    pybind11_add_module(engine_ext bindings/module.cpp)
+    target_link_libraries(engine_ext PRIVATE engine_core)
+    install(TARGETS engine_ext LIBRARY DESTINATION engine)
+endif()
+
 if(ENGINE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/cpp)
