@@ -23,7 +23,8 @@ foreach(_engine_gtest_target gtest gtest_main gmock gmock_main)
 endforeach()
 
 add_executable(engine_tests
-    test_version.cpp)
+    test_version.cpp
+    test_tensor.cpp)
 target_link_libraries(engine_tests PRIVATE engine_core GTest::gtest_main)
 
 include(GoogleTest)

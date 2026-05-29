@@ -17,10 +17,23 @@ endif()
 option(ENGINE_ENABLE_CUDA "Build CUDA kernels and link cuBLAS" OFF)
 option(ENGINE_BUILD_TESTS "Build the C++ test suite" ON)
 
+include(FetchContent)
+# Eigen supplies the CPU GEMM. Fetch headers only: pointing SOURCE_SUBDIR at a
+# directory Eigen does not contain skips running Eigen's own CMake project.
+FetchContent_Declare(
+    eigen
+    URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR _engine_skip_eigen_cmake)
+FetchContent_MakeAvailable(eigen)
+
 add_library(engine_core STATIC
-    src/core/version.cpp)
+    src/core/version.cpp
+    src/core/dtype.cpp
+    src/core/matmul.cpp)
 target_include_directories(engine_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_include_directories(engine_core SYSTEM PRIVATE ${eigen_SOURCE_DIR})
 target_compile_features(engine_core PUBLIC cxx_std_20)
 
 if(ENGINE_ENABLE_CUDA)
