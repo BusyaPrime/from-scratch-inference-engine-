@@ -1,0 +1,57 @@
+# Build output
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+_skbuild/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+/dist/
+/wheelhouse/
+.venv/
+venv/
+.env
+
+# Native build artifacts
+*.so
+*.pyd
+*.dll
+*.dylib
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.pdb
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Model weights and datasets (fetched at runtime, never committed)
+/weights/
+/models/
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.onnx
+
+# Benchmark raw captures; only JSON summaries and plots under benchmarks/results are tracked
+/benchmarks/results/raw/
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+
+# Logs
+*.log

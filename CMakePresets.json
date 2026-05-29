@@ -1,0 +1,86 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/install/${presetName}"
+      }
+    },
+    {
+      "name": "win-clangcl",
+      "hidden": true,
+      "inherits": "base",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "win-msvc",
+      "hidden": true,
+      "inherits": "base",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "nix",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "cpu-debug",
+      "displayName": "CPU Debug (clang-cl, Ninja)",
+      "inherits": "win-clangcl",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "ENGINE_ENABLE_CUDA": "OFF" }
+    },
+    {
+      "name": "cpu-release",
+      "displayName": "CPU Release (clang-cl, Ninja)",
+      "inherits": "win-clangcl",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "ENGINE_ENABLE_CUDA": "OFF" }
+    },
+    {
+      "name": "cuda-release",
+      "displayName": "CUDA Release (MSVC host, Ninja)",
+      "inherits": "win-msvc",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "ENGINE_ENABLE_CUDA": "ON" }
+    },
+    {
+      "name": "linux-cpu-debug",
+      "displayName": "CPU Debug (Linux, Ninja)",
+      "inherits": "nix",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "ENGINE_ENABLE_CUDA": "OFF" }
+    },
+    {
+      "name": "linux-cpu-release",
+      "displayName": "CPU Release (Linux, Ninja)",
+      "inherits": "nix",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "ENGINE_ENABLE_CUDA": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "cpu-debug", "configurePreset": "cpu-debug" },
+    { "name": "cpu-release", "configurePreset": "cpu-release" },
+    { "name": "cuda-release", "configurePreset": "cuda-release" },
+    { "name": "linux-cpu-debug", "configurePreset": "linux-cpu-debug" },
+    { "name": "linux-cpu-release", "configurePreset": "linux-cpu-release" }
+  ],
+  "testPresets": [
+    { "name": "cpu-debug", "configurePreset": "cpu-debug", "output": { "outputOnFailure": true } },
+    { "name": "cpu-release", "configurePreset": "cpu-release", "output": { "outputOnFailure": true } },
+    { "name": "linux-cpu-release", "configurePreset": "linux-cpu-release", "output": { "outputOnFailure": true } }
+  ]
+}
