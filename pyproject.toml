@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 serve = ["fastapi", "uvicorn"]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "huggingface_hub>=0.24"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"

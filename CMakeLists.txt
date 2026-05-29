@@ -27,13 +27,26 @@ FetchContent_Declare(
     SOURCE_SUBDIR _engine_skip_eigen_cmake)
 FetchContent_MakeAvailable(eigen)
 
+# nlohmann/json parses safetensors headers and config.json. Headers only, via the
+# same SOURCE_SUBDIR trick (its CMake declares an older cmake_minimum_required).
+FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR _engine_skip_json_cmake)
+FetchContent_MakeAvailable(nlohmann_json)
+
 add_library(engine_core STATIC
     src/core/version.cpp
     src/core/dtype.cpp
-    src/core/matmul.cpp)
+    src/core/matmul.cpp
+    src/model/model_config.cpp
+    src/model/safetensors.cpp)
 target_include_directories(engine_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-target_include_directories(engine_core SYSTEM PRIVATE ${eigen_SOURCE_DIR})
+target_include_directories(engine_core SYSTEM PRIVATE
+    ${eigen_SOURCE_DIR}
+    ${nlohmann_json_SOURCE_DIR}/single_include)
 target_compile_features(engine_core PUBLIC cxx_std_20)
 
 if(ENGINE_ENABLE_CUDA)
