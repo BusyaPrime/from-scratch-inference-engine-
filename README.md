@@ -17,11 +17,15 @@ matches its uninterrupted output.
 
 The CUDA path is now in: hand-written kernels for RMSNorm, SwiGLU, RoPE, causal grouped-query
 attention, embedding gather, and the residual add, plus cuBLAS for GEMM. On top of them sit a
-device-resident forward, a device KV cache with cached decode, greedy generation, and a batched
-forward (continuous-batching compute across many sequences). Every kernel is checked against its
-CPU twin, and the full GPU forward, cached decode, and batched forward all match the CPU path (and
-so, transitively, `transformers`). Still ahead: a GPU-backed scheduler, a shared device paged pool
-(GPU PagedAttention), and the head-to-head against `nano-vllm` and `vllm`.
+device-resident forward, a device KV cache with cached decode, greedy generation, a batched
+forward (continuous-batching compute across many sequences), a GPU continuous-batching scheduler
+(`CudaEngine`), and a shared device block pool (`GpuBlockManager`) with a paged batched forward —
+true GPU PagedAttention. Every kernel is checked against its CPU twin, and the full GPU forward,
+cached decode, batched forward, and paged forward all match the CPU path (and so, transitively,
+`transformers`). A comparison harness benchmarks the engine against the `transformers` reference;
+the `nano-vllm`/`vllm` head-to-head uses the same recipe on a Linux + CUDA host where they install
+cleanly. Still ahead: half precision and the Phase 5 stretch (speculative decoding, prefix caching,
+quantization).
 
 ## Benchmarks
 
@@ -130,6 +134,13 @@ For the GPU path (requires the CUDA toolkit and the `cuda-release` build):
 cmake --preset cuda-release
 cmake --build --preset cuda-release --target bench_cuda
 build/cuda-release/bench_cuda weights/Qwen2.5-0.5B-Instruct 16 64
+```
+
+Head-to-head against the `transformers` reference (same model, precision, greedy):
+
+```
+pip install -e ".[dev]" && pip install torch transformers
+python benchmarks/harness/compare_baselines.py --model-dir weights/Qwen2.5-0.5B-Instruct
 ```
 
 ## Scope and limitations
