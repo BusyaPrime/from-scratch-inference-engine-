@@ -2,6 +2,7 @@
 #include "engine/model.hpp"
 
 #include "engine/nn.hpp"
+#include "engine/paged_kv_cache.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -48,7 +49,8 @@ Tensor Model::forward(const std::vector<int64_t>& ids) const {
     return forward_with_cache(ids, cache);
 }
 
-Tensor Model::forward_with_cache(const std::vector<int64_t>& ids, KVCache& cache) const {
+template <typename Cache>
+Tensor Model::forward_cached(const std::vector<int64_t>& ids, Cache& cache) const {
     const ModelConfig& c = config_;
     const auto seq = static_cast<int64_t>(ids.size());
     if (seq == 0) {
@@ -106,6 +108,14 @@ Tensor Model::forward_with_cache(const std::vector<int64_t>& ids, KVCache& cache
     const Tensor& lm_head =
         weights_.contains("lm_head.weight") ? weights_.get("lm_head.weight") : embed;
     return linear(normed, lm_head); // [S, vocab_size]
+}
+
+Tensor Model::forward_with_cache(const std::vector<int64_t>& ids, KVCache& cache) const {
+    return forward_cached(ids, cache);
+}
+
+Tensor Model::forward_paged(const std::vector<int64_t>& ids, PagedKVCache& cache) const {
+    return forward_cached(ids, cache);
 }
 
 } // namespace engine

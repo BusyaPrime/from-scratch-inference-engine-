@@ -43,6 +43,7 @@ add_library(engine_core STATIC
     src/model/safetensors.cpp
     src/model/nn.cpp
     src/model/model.cpp
+    src/kvcache/paged_kv_cache.cpp
     src/sampler/sampler.cpp)
 target_include_directories(engine_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)

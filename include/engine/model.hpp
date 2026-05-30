@@ -3,6 +3,7 @@
 
 #include "engine/kv_cache.hpp"
 #include "engine/model_config.hpp"
+#include "engine/paged_kv_cache.hpp"
 #include "engine/safetensors.hpp"
 #include "engine/tensor.hpp"
 
@@ -29,11 +30,18 @@ public:
     // chunk followed by single-token steps reproduces the full forward.
     [[nodiscard]] Tensor forward_with_cache(const std::vector<int64_t>& ids, KVCache& cache) const;
 
+    // The same cached forward over paged (block-table) KV storage.
+    [[nodiscard]] Tensor forward_paged(const std::vector<int64_t>& ids, PagedKVCache& cache) const;
+
     [[nodiscard]] const ModelConfig& config() const noexcept { return config_; }
 
 private:
     Model(ModelConfig config, SafeTensors weights)
         : config_(std::move(config)), weights_(std::move(weights)) {}
+
+    // Shared cached-forward body; instantiated for KVCache and PagedKVCache.
+    template <typename Cache>
+    [[nodiscard]] Tensor forward_cached(const std::vector<int64_t>& ids, Cache& cache) const;
 
     ModelConfig config_;
     SafeTensors weights_;
