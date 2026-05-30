@@ -32,7 +32,8 @@ add_executable(engine_tests
     test_block_allocator.cpp
     test_paged_attention.cpp
     test_block_manager.cpp
-    test_continuous_batch.cpp)
+    test_continuous_batch.cpp
+    test_engine.cpp)
 target_link_libraries(engine_tests PRIVATE engine_core GTest::gtest_main)
 target_compile_definitions(engine_tests PRIVATE ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
