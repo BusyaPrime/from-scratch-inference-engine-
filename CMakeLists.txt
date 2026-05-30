@@ -64,6 +64,8 @@ if(ENGINE_ENABLE_CUDA)
     set_target_properties(engine_core PROPERTIES CUDA_STANDARD 20 CUDA_ARCHITECTURES 89)
     target_compile_definitions(engine_core PUBLIC ENGINE_WITH_CUDA=1)
     target_link_libraries(engine_core PUBLIC CUDA::cudart CUDA::cublas)
+    add_executable(bench_cuda benchmarks/harness/bench_cuda.cpp)
+    target_link_libraries(bench_cuda PRIVATE engine_core)
 endif()
 
 # Python binding module. Built whenever pybind11 is available, which is always

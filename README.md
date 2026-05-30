@@ -25,20 +25,22 @@ fp32 CPU reference path.
 
 ## Benchmarks
 
-Measured on the fp32 CPU reference path (single-threaded GEMM), Qwen2.5-0.5B-Instruct, greedy
-decoding, 32 output tokens per request. Reproduce with the command under
+Qwen2.5-0.5B-Instruct, fp32, greedy decoding, on an RTX 4060 Laptop (8 GB). CPU figures are from
+the Python harness (single-threaded GEMM); GPU figures from the C++ `bench_cuda` harness (single
+stream, 16-token prompt, 64 generated). Reproduce with the commands under
 [Reproduce the benchmarks](#reproduce-the-benchmarks).
 
-| Workload                  | Throughput   | TTFT    | TPOT     |
-| ------------------------- | ------------ | ------- | -------- |
-| single stream (1 request) | ~4.8 tok/s   | ~0.8 s  | ~190 ms  |
-| 8 concurrent requests     | ~8.0 tok/s   | —       | —        |
+| Path                        | Throughput | TTFT    | TPOT    |
+| --------------------------- | ---------- | ------- | ------- |
+| CPU, single stream          | ~4.8 tok/s | ~0.8 s  | ~190 ms |
+| CPU, 8 concurrent (batched) | ~8.0 tok/s | —       | —       |
+| GPU, single stream          | ~43 tok/s  | ~31 ms  | ~23 ms  |
 
-Continuous batching lifts aggregate throughput roughly 1.7x over a single stream by sharing each
-forward pass's weight reads and matmuls across the batch. These are reference-path figures;
-absolute speed is the job of the CUDA path. A full TTFT/TPOT/throughput comparison against
-`nano-vllm` and `vllm` on identical hardware, model, and precision lands with the GPU kernels.
-See [benchmarks/](benchmarks/) for the harness.
+The GPU path runs roughly 9x the CPU decode rate even before optimisation: the attention kernel is
+a straightforward one-thread-per-query design and precision is fp32, both chosen for a clean parity
+anchor rather than peak speed. On CPU, continuous batching lifts aggregate throughput ~1.7x by
+sharing each forward's weight reads across the batch. Still ahead: GPU continuous batching and the
+head-to-head against `nano-vllm` and `vllm`. See [benchmarks/](benchmarks/) for the harnesses.
 
 ## Architecture
 
@@ -121,6 +123,14 @@ python benchmarks/harness/bench_engine.py \
 
 Pass `--json` for machine-readable output. The harness reports TTFT, TPOT, throughput, and
 requests per second over a batch submitted up front.
+
+For the GPU path (requires the CUDA toolkit and the `cuda-release` build):
+
+```
+cmake --preset cuda-release
+cmake --build --preset cuda-release --target bench_cuda
+build/cuda-release/bench_cuda weights/Qwen2.5-0.5B-Instruct 16 64
+```
 
 ## Scope and limitations
 
