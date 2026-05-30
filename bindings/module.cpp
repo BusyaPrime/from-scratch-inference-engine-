@@ -96,14 +96,16 @@ PYBIND11_MODULE(engine_ext, m) {
 
     // keep_alive<1, 2>: the referenced Model must outlive the Engine that borrows it.
     py::class_<engine::Engine>(m, "Engine")
-        .def(py::init<const engine::Model&, int64_t, int64_t, uint64_t, int64_t>(),
+        .def(py::init<const engine::Model&, int64_t, int64_t, uint64_t, int64_t, bool>(),
              py::arg("model"),
              py::arg("block_size"),
              py::arg("num_blocks"),
              py::arg("seed") = 0,
              py::arg("max_batch") = 256,
+             py::arg("enable_prefix_cache") = true,
              py::keep_alive<1, 2>(),
-             "Continuous-batching engine over a shared paged KV pool.")
+             "Continuous-batching engine over a shared paged KV pool. Prefix caching is on "
+             "by default: requests sharing a prompt prefix reuse cached KV blocks.")
         .def(
             "add_request",
             [](engine::Engine& self,
@@ -128,6 +130,9 @@ PYBIND11_MODULE(engine_ext, m) {
         .def("output", &engine::Engine::output, py::arg("id"))
         .def("status", &engine::Engine::status, py::arg("id"))
         .def("preemptions", &engine::Engine::preemptions)
+        .def("prefix_hits",
+             &engine::Engine::prefix_hits,
+             "Number of sequences that reused at least one cached prompt-prefix block.")
         .def("generate",
              &engine::Engine::generate,
              py::arg("prompt"),
