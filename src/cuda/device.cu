@@ -188,6 +188,42 @@ __global__ void attention_kernel(const float* q,
     }
 }
 
+__global__ void paged_scatter_kernel(float* pool,
+                                     const int64_t* block_table,
+                                     const float* src,
+                                     int64_t start,
+                                     int64_t n,
+                                     int64_t block_size,
+                                     int64_t kv_dim) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n * kv_dim) {
+        return;
+    }
+    const int64_t r = idx / kv_dim;
+    const int64_t e = idx % kv_dim;
+    const int64_t logical = start + r;
+    const int64_t pb = block_table[logical / block_size];
+    const int64_t slot = logical % block_size;
+    pool[(pb * block_size + slot) * kv_dim + e] = src[r * kv_dim + e];
+}
+
+__global__ void paged_gather_kernel(const float* pool,
+                                    const int64_t* block_table,
+                                    float* out,
+                                    int64_t rows,
+                                    int64_t block_size,
+                                    int64_t kv_dim) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= rows * kv_dim) {
+        return;
+    }
+    const int64_t r = idx / kv_dim;
+    const int64_t e = idx % kv_dim;
+    const int64_t pb = block_table[r / block_size];
+    const int64_t slot = r % block_size;
+    out[idx] = pool[(pb * block_size + slot) * kv_dim + e];
+}
+
 } // namespace
 
 namespace kernels {
@@ -299,6 +335,35 @@ void attention(const float* q,
     attention_kernel<<<grid_for(n_heads * q_len, kThreads), kThreads>>>(
         q, k, v, out, q_len, n_heads, n_kv_heads, head_dim, query_offset, scale);
     check(cudaGetLastError(), "launch attention");
+}
+
+void paged_scatter(float* pool,
+                   const int64_t* block_table,
+                   const float* src,
+                   int64_t start,
+                   int64_t n,
+                   int64_t block_size,
+                   int64_t kv_dim) {
+    if (n <= 0 || kv_dim <= 0) {
+        return;
+    }
+    paged_scatter_kernel<<<grid_for(n * kv_dim, kThreads), kThreads>>>(
+        pool, block_table, src, start, n, block_size, kv_dim);
+    check(cudaGetLastError(), "launch paged_scatter");
+}
+
+void paged_gather(const float* pool,
+                  const int64_t* block_table,
+                  float* out,
+                  int64_t rows,
+                  int64_t block_size,
+                  int64_t kv_dim) {
+    if (rows <= 0 || kv_dim <= 0) {
+        return;
+    }
+    paged_gather_kernel<<<grid_for(rows * kv_dim, kThreads), kThreads>>>(
+        pool, block_table, out, rows, block_size, kv_dim);
+    check(cudaGetLastError(), "launch paged_gather");
 }
 
 } // namespace kernels

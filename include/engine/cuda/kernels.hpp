@@ -52,4 +52,22 @@ void attention(const float* q,
                int64_t head_dim,
                int64_t query_offset);
 
+// Paged K/V movement through a device block table. The pool is laid out as
+// [num_blocks, block_size, kv_dim]; block_table maps logical block index to physical block.
+// scatter writes n rows from src at logical rows [start, start+n); gather reads rows [0, rows)
+// into a contiguous out buffer in logical order.
+void paged_scatter(float* pool,
+                   const int64_t* block_table,
+                   const float* src,
+                   int64_t start,
+                   int64_t n,
+                   int64_t block_size,
+                   int64_t kv_dim);
+void paged_gather(const float* pool,
+                  const int64_t* block_table,
+                  float* out,
+                  int64_t rows,
+                  int64_t block_size,
+                  int64_t kv_dim);
+
 } // namespace engine::cuda::kernels
