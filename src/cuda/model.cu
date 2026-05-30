@@ -95,6 +95,20 @@ std::string layer_key(int64_t layer, const std::string& suffix) {
     return "model.layers." + std::to_string(layer) + "." + suffix;
 }
 
+// Index of the maximum logit in the final row (greedy next token; first max wins ties).
+int64_t argmax_last_row(const Tensor& logits) {
+    const int64_t rows = logits.dim(0);
+    const int64_t vocab = logits.dim(1);
+    const float* row = logits.data() + (rows - 1) * vocab;
+    int64_t best = 0;
+    for (int64_t j = 1; j < vocab; ++j) {
+        if (row[j] > row[best]) {
+            best = j;
+        }
+    }
+    return best;
+}
+
 } // namespace
 
 struct CudaModel::Impl {
@@ -302,6 +316,28 @@ Tensor CudaModel::forward(const std::vector<int64_t>& ids) const {
 
 Tensor CudaModel::forward_with_cache(const std::vector<int64_t>& ids, GpuKVCache& cache) const {
     return impl_->forward_cached(ids, cache);
+}
+
+std::vector<int64_t>
+CudaModel::generate(const std::vector<int64_t>& prompt, int64_t max_tokens, int64_t eos_id) const {
+    std::vector<int64_t> out;
+    if (max_tokens <= 0 || prompt.empty()) {
+        return out;
+    }
+    const ModelConfig& c = impl_->config;
+    GpuKVCache cache(c.num_hidden_layers,
+                     c.num_key_value_heads * c.head_dim,
+                     static_cast<int64_t>(prompt.size()) + max_tokens);
+
+    Tensor logits = forward_with_cache(prompt, cache);
+    int64_t token = argmax_last_row(logits);
+    out.push_back(token);
+    while (static_cast<int64_t>(out.size()) < max_tokens && token != eos_id) {
+        logits = forward_with_cache({token}, cache);
+        token = argmax_last_row(logits);
+        out.push_back(token);
+    }
+    return out;
 }
 
 CudaModel CudaModel::from_safetensors(ModelConfig config, const SafeTensors& weights) {

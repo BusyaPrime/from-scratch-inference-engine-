@@ -35,6 +35,11 @@ public:
     [[nodiscard]] Tensor forward_with_cache(const std::vector<int64_t>& ids,
                                             GpuKVCache& cache) const;
 
+    // Greedy decode using cached forward: returns up to max_tokens generated ids, stopping early at
+    // eos_id (-1 disables). The next token is the argmax of the last position's logits.
+    [[nodiscard]] std::vector<int64_t>
+    generate(const std::vector<int64_t>& prompt, int64_t max_tokens, int64_t eos_id = -1) const;
+
     [[nodiscard]] const ModelConfig& config() const noexcept;
 
 private:

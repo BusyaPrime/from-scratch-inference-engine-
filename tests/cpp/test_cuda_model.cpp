@@ -66,3 +66,42 @@ TEST(CudaModel, CachedDecodeMatchesFullForward) {
     }
     EXPECT_EQ(cache.length(), static_cast<int64_t>(seq.size()));
 }
+
+namespace {
+
+int64_t argmax_last(const engine::Tensor& logits) {
+    const int64_t rows = logits.dim(0);
+    const int64_t vocab = logits.dim(1);
+    const float* row = logits.data() + (rows - 1) * vocab;
+    int64_t best = 0;
+    for (int64_t j = 1; j < vocab; ++j) {
+        if (row[j] > row[best]) {
+            best = j;
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+// Greedy generate (cached decode) must match a full-forward greedy reference token for token.
+TEST(CudaModel, GreedyGenerationMatchesFullForward) {
+    const engine::ModelConfig config = tiny::tiny_config();
+    const engine::SafeTensors weights = engine::SafeTensors::from_tensors(tiny::tiny_weights());
+    const engine::cuda::CudaModel gpu = engine::cuda::CudaModel::from_safetensors(config, weights);
+
+    const std::vector<int64_t> prompt = {1, 2, 3};
+    const int64_t n = 6;
+
+    std::vector<int64_t> reference;
+    std::vector<int64_t> ids = prompt;
+    for (int64_t i = 0; i < n; ++i) {
+        const engine::Tensor logits = gpu.forward(ids);
+        const int64_t token = argmax_last(logits);
+        reference.push_back(token);
+        ids.push_back(token);
+    }
+
+    const std::vector<int64_t> got = gpu.generate(prompt, n, -1);
+    EXPECT_EQ(got, reference);
+}
