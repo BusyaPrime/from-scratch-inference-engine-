@@ -50,11 +50,14 @@ class LLM:
         seed: int = 0,
         max_batch: int = 256,
         eos_id: int | None = None,
+        enable_prefix_cache: bool = True,
     ):
         model_dir = Path(model_dir)
         self.model = engine_ext.Model.from_pretrained(str(model_dir))
         self.tokenizer = EngineTokenizer.from_model_dir(model_dir)
-        self.engine = engine_ext.Engine(self.model, block_size, num_blocks, seed, max_batch)
+        self.engine = engine_ext.Engine(
+            self.model, block_size, num_blocks, seed, max_batch, enable_prefix_cache
+        )
         self.eos_id = _read_eos_id(model_dir) if eos_id is None else eos_id
 
     def _params(self, config: GenerationConfig) -> engine_ext.SamplingParams:

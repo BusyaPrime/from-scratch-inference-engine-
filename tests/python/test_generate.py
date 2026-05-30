@@ -42,3 +42,21 @@ def test_concurrent_requests_match_sequential():
     batched_out = [list(llm.engine.output(s)) for s in seq_ids]
 
     assert batched_out == sequential_out
+
+
+def test_prefix_cache_reuses_shared_prompt_and_matches():
+    config = GenerationConfig(max_tokens=16, temperature=0.0)
+    prompt = "The capital of France is the city of"
+    follow = "The capital of France is famous for"  # shares a long token prefix
+
+    plain = LLM(_MODEL_DIR, block_size=16, num_blocks=512, seed=0, enable_prefix_cache=False)
+    ref_a = plain.generate(prompt, config)
+    ref_b = plain.generate(follow, config)
+
+    cached = LLM(_MODEL_DIR, block_size=16, num_blocks=512, seed=0, enable_prefix_cache=True)
+    got_a = cached.generate(prompt, config)
+    got_b = cached.generate(follow, config)
+
+    assert got_a == ref_a
+    assert got_b == ref_b
+    assert cached.engine.prefix_hits() > 0  # the shared prefix was reused from cache
