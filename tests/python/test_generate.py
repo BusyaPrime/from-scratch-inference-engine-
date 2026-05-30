@@ -60,3 +60,12 @@ def test_prefix_cache_reuses_shared_prompt_and_matches():
     assert got_a == ref_a
     assert got_b == ref_b
     assert cached.engine.prefix_hits() > 0  # the shared prefix was reused from cache
+
+
+def test_quantized_generation_runs_and_decodes():
+    llm = LLM(_MODEL_DIR, block_size=16, num_blocks=512, seed=0, quantize=True)
+    assert llm.model.is_quantized()
+
+    config = GenerationConfig(max_tokens=16, temperature=0.0)
+    out = llm.generate("The capital of France is", config)
+    assert isinstance(out, str) and out  # the quantized serving path produces text

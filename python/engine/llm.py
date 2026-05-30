@@ -51,9 +51,12 @@ class LLM:
         max_batch: int = 256,
         eos_id: int | None = None,
         enable_prefix_cache: bool = True,
+        quantize: bool = False,
     ):
         model_dir = Path(model_dir)
         self.model = engine_ext.Model.from_pretrained(str(model_dir))
+        if quantize:
+            self.model.quantize()  # weight-only int8; opt-in so fp32 parity stays the default
         self.tokenizer = EngineTokenizer.from_model_dir(model_dir)
         self.engine = engine_ext.Engine(
             self.model, block_size, num_blocks, seed, max_batch, enable_prefix_cache
