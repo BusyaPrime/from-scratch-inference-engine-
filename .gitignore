@@ -55,3 +55,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local working notes (never tracked)
+/PROJECT_CONTEXT.md
