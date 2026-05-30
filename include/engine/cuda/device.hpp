@@ -35,4 +35,15 @@ void rope(float* x,
           double theta,
           const int64_t* positions);
 
+// y[rows, out_dim] = x[rows, in_dim] * weight[out_dim, in_dim]^T (+ bias[out_dim] if non-null),
+// the Hugging Face Linear convention, via cuBLAS in strict fp32 (TF32 disabled) to match the CPU
+// GEMM. bias may be nullptr.
+void linear(const float* x,
+            const float* weight,
+            const float* bias,
+            float* y,
+            int64_t rows,
+            int64_t in_dim,
+            int64_t out_dim);
+
 } // namespace engine::cuda

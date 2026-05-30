@@ -82,3 +82,41 @@ TEST(CudaKernels, RopeMatchesCpu) {
         EXPECT_NEAR(gpu[static_cast<std::size_t>(i)], reference.data()[i], 1e-4f) << "index " << i;
     }
 }
+
+// The cuBLAS GEMM (strict fp32) must match the CPU linear, with and without bias.
+TEST(CudaKernels, LinearMatchesCpu) {
+    std::mt19937 rng(17);
+    const int64_t rows = 4;
+    const int64_t in_dim = 896;
+    const int64_t out_dim = 4864;
+
+    const engine::Tensor x = random_tensor({rows, in_dim}, rng, 0.05f);
+    const engine::Tensor weight = random_tensor({out_dim, in_dim}, rng, 0.05f);
+    const engine::Tensor reference = engine::linear(x, weight);
+
+    std::vector<float> out(static_cast<std::size_t>(rows * out_dim));
+    engine::cuda::linear(x.data(), weight.data(), nullptr, out.data(), rows, in_dim, out_dim);
+
+    for (int64_t i = 0; i < rows * out_dim; ++i) {
+        EXPECT_NEAR(out[static_cast<std::size_t>(i)], reference.data()[i], 1e-3f) << "index " << i;
+    }
+}
+
+TEST(CudaKernels, LinearWithBiasMatchesCpu) {
+    std::mt19937 rng(19);
+    const int64_t rows = 3;
+    const int64_t in_dim = 896;
+    const int64_t out_dim = 128;
+
+    const engine::Tensor x = random_tensor({rows, in_dim}, rng, 0.05f);
+    const engine::Tensor weight = random_tensor({out_dim, in_dim}, rng, 0.05f);
+    const engine::Tensor bias = random_tensor({out_dim}, rng, 0.1f);
+    const engine::Tensor reference = engine::linear(x, weight, bias);
+
+    std::vector<float> out(static_cast<std::size_t>(rows * out_dim));
+    engine::cuda::linear(x.data(), weight.data(), bias.data(), out.data(), rows, in_dim, out_dim);
+
+    for (int64_t i = 0; i < rows * out_dim; ++i) {
+        EXPECT_NEAR(out[static_cast<std::size_t>(i)], reference.data()[i], 1e-3f) << "index " << i;
+    }
+}

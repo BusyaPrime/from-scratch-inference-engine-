@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "engine/cuda/device.hpp"
 
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -11,6 +12,19 @@ namespace {
 void check(cudaError_t status, const char* what) {
     if (status != cudaSuccess) {
         throw std::runtime_error(std::string("cuda: ") + what + ": " + cudaGetErrorString(status));
+    }
+}
+
+void cublas_check(cublasStatus_t status, const char* what) {
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        throw std::runtime_error(std::string("cublas: ") + what);
+    }
+}
+
+__global__ void add_bias_kernel(float* y, const float* bias, int64_t rows, int64_t out_dim) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < rows * out_dim) {
+        y[idx] += bias[idx % out_dim];
     }
 }
 
@@ -207,6 +221,78 @@ void rope(float* x,
 
     cudaFree(dx);
     cudaFree(dpos);
+}
+
+void linear(const float* x,
+            const float* weight,
+            const float* bias,
+            float* y,
+            int64_t rows,
+            int64_t in_dim,
+            int64_t out_dim) {
+    if (rows <= 0 || in_dim <= 0 || out_dim <= 0) {
+        return;
+    }
+    const auto x_bytes = sizeof(float) * static_cast<std::size_t>(rows * in_dim);
+    const auto w_bytes = sizeof(float) * static_cast<std::size_t>(out_dim * in_dim);
+    const auto y_bytes = sizeof(float) * static_cast<std::size_t>(rows * out_dim);
+    float* dx = nullptr;
+    float* dw = nullptr;
+    float* dy = nullptr;
+    float* dbias = nullptr;
+    check(cudaMalloc(&dx, x_bytes), "malloc x");
+    check(cudaMalloc(&dw, w_bytes), "malloc weight");
+    check(cudaMalloc(&dy, y_bytes), "malloc y");
+    check(cudaMemcpy(dx, x, x_bytes, cudaMemcpyHostToDevice), "copy x");
+    check(cudaMemcpy(dw, weight, w_bytes, cudaMemcpyHostToDevice), "copy weight");
+    if (bias != nullptr) {
+        check(cudaMalloc(&dbias, sizeof(float) * static_cast<std::size_t>(out_dim)), "malloc bias");
+        check(cudaMemcpy(dbias,
+                         bias,
+                         sizeof(float) * static_cast<std::size_t>(out_dim),
+                         cudaMemcpyHostToDevice),
+              "copy bias");
+    }
+
+    cublasHandle_t handle = nullptr;
+    cublas_check(cublasCreate(&handle), "create handle");
+    // Strict IEEE fp32 (no TF32 tensor cores) so results match the CPU Eigen GEMM.
+    cublas_check(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH), "set math mode");
+
+    // Row-major y = x * weight^T equals, in cuBLAS column-major, y' = weight'^T * x' where the
+    // row-major buffers are read directly as their column-major transposes.
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    cublas_check(cublasSgemm(handle,
+                             CUBLAS_OP_T,
+                             CUBLAS_OP_N,
+                             static_cast<int>(out_dim),
+                             static_cast<int>(rows),
+                             static_cast<int>(in_dim),
+                             &alpha,
+                             dw,
+                             static_cast<int>(in_dim),
+                             dx,
+                             static_cast<int>(in_dim),
+                             &beta,
+                             dy,
+                             static_cast<int>(out_dim)),
+                 "sgemm");
+
+    if (dbias != nullptr) {
+        const int threads = 256;
+        const int blocks = static_cast<int>((rows * out_dim + threads - 1) / threads);
+        add_bias_kernel<<<blocks, threads>>>(dy, dbias, rows, out_dim);
+        check(cudaGetLastError(), "launch add_bias");
+    }
+
+    check(cudaMemcpy(y, dy, y_bytes, cudaMemcpyDeviceToHost), "copy y");
+
+    cublasDestroy(handle);
+    cudaFree(dx);
+    cudaFree(dw);
+    cudaFree(dy);
+    cudaFree(dbias);
 }
 
 } // namespace engine::cuda
