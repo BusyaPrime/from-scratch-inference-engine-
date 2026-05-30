@@ -55,10 +55,15 @@ target_include_directories(engine_core SYSTEM PRIVATE
 target_compile_features(engine_core PUBLIC cxx_std_20)
 
 if(ENGINE_ENABLE_CUDA)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 89) # Ada Lovelace (RTX 40-series)
+    endif()
     enable_language(CUDA)
-    set(CMAKE_CUDA_STANDARD 20)
     find_package(CUDAToolkit REQUIRED)
-    # Kernel sources and cuBLAS linkage land in Phase 4.
+    target_sources(engine_core PRIVATE src/cuda/device.cu)
+    set_target_properties(engine_core PROPERTIES CUDA_STANDARD 20 CUDA_ARCHITECTURES 89)
+    target_compile_definitions(engine_core PUBLIC ENGINE_WITH_CUDA=1)
+    target_link_libraries(engine_core PUBLIC CUDA::cudart CUDA::cublas)
 endif()
 
 # Python binding module. Built whenever pybind11 is available, which is always
