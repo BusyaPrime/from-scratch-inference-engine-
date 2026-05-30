@@ -4,11 +4,13 @@
 #include "engine/nn.hpp"
 #include "engine/paged_kv_cache.hpp"
 
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace engine {
 namespace {
@@ -116,6 +118,130 @@ Tensor Model::forward_with_cache(const std::vector<int64_t>& ids, KVCache& cache
 
 Tensor Model::forward_paged(const std::vector<int64_t>& ids, PagedKVCache& cache) const {
     return forward_cached(ids, cache);
+}
+
+Tensor Model::forward_batch(BlockManager& manager, const std::vector<BatchItem>& items) const {
+    const ModelConfig& c = config_;
+    if (items.empty()) {
+        throw std::invalid_argument("forward_batch: empty batch");
+    }
+    const auto num_items = static_cast<int64_t>(items.size());
+    const int64_t nq_dim = c.num_attention_heads * c.head_dim;
+    const int64_t nkv_dim = c.num_key_value_heads * c.head_dim;
+
+    // Concatenate every item's new tokens into one flat layout and record where each item lives.
+    std::vector<int64_t> all_ids;
+    std::vector<int64_t> positions;
+    std::vector<int64_t> offset(static_cast<std::size_t>(num_items));
+    std::vector<int64_t> len(static_cast<std::size_t>(num_items));
+    std::vector<int64_t> past(static_cast<std::size_t>(num_items));
+    int64_t total_tokens = 0;
+    for (int64_t i = 0; i < num_items; ++i) {
+        const BatchItem& item = items[static_cast<std::size_t>(i)];
+        if (item.blocks == nullptr) {
+            throw std::invalid_argument("forward_batch: null sequence blocks");
+        }
+        if (item.tokens.empty()) {
+            throw std::invalid_argument("forward_batch: item has no tokens");
+        }
+        const auto item_len = static_cast<int64_t>(item.tokens.size());
+        const int64_t item_past = item.blocks->length;
+        offset[static_cast<std::size_t>(i)] = total_tokens;
+        len[static_cast<std::size_t>(i)] = item_len;
+        past[static_cast<std::size_t>(i)] = item_past;
+        for (int64_t t = 0; t < item_len; ++t) {
+            all_ids.push_back(item.tokens[static_cast<std::size_t>(t)]);
+            positions.push_back(item_past + t);
+        }
+        total_tokens += item_len;
+        manager.reserve(*item.blocks, item_len); // grow paging for the new tokens
+    }
+
+    const Tensor& embed = weights_.get("model.embed_tokens.weight");
+    Tensor x = embedding(embed, all_ids); // [T, H]
+
+    for (int64_t l = 0; l < c.num_hidden_layers; ++l) {
+        Tensor normed =
+            rms_norm(x, weights_.get(layer_key(l, "input_layernorm.weight")), c.rms_norm_eps);
+
+        const auto project = [&](const std::string& name) {
+            const Tensor& weight = weights_.get(layer_key(l, "self_attn." + name + "_proj.weight"));
+            if (c.attention_qkv_bias) {
+                return linear(
+                    normed, weight, weights_.get(layer_key(l, "self_attn." + name + "_proj.bias")));
+            }
+            return linear(normed, weight);
+        };
+        Tensor q = project("q"); // [T, nq_dim], one big GEMM across all items
+        Tensor k = project("k"); // [T, nkv_dim]
+        Tensor v = project("v"); // [T, nkv_dim]
+
+        rope_inplace(q, c.num_attention_heads, c.head_dim, c.rope_theta, positions);
+        rope_inplace(k, c.num_key_value_heads, c.head_dim, c.rope_theta, positions);
+
+        // Attention is per-item: each sequence attends only over its own paged K/V.
+        Tensor attn({total_tokens, nq_dim});
+        for (int64_t i = 0; i < num_items; ++i) {
+            const auto si = static_cast<std::size_t>(i);
+            SequenceBlocks& blk = *items[si].blocks;
+            manager.write(blk,
+                          l,
+                          past[si],
+                          k.data() + offset[si] * nkv_dim,
+                          v.data() + offset[si] * nkv_dim,
+                          len[si]);
+            const int64_t total = past[si] + len[si];
+            const Tensor k_all = manager.gather_keys(blk, l, total);
+            const Tensor v_all = manager.gather_values(blk, l, total);
+
+            Tensor q_slice({len[si], nq_dim});
+            std::memcpy(q_slice.data(),
+                        q.data() + offset[si] * nq_dim,
+                        sizeof(float) * static_cast<std::size_t>(len[si] * nq_dim));
+            Tensor attn_slice = attention(q_slice,
+                                          k_all,
+                                          v_all,
+                                          c.num_attention_heads,
+                                          c.num_key_value_heads,
+                                          c.head_dim,
+                                          past[si]);
+            std::memcpy(attn.data() + offset[si] * nq_dim,
+                        attn_slice.data(),
+                        sizeof(float) * static_cast<std::size_t>(len[si] * nq_dim));
+        }
+
+        Tensor attn_out = linear(attn, weights_.get(layer_key(l, "self_attn.o_proj.weight")));
+        add_inplace(x, attn_out);
+
+        Tensor normed2 = rms_norm(
+            x, weights_.get(layer_key(l, "post_attention_layernorm.weight")), c.rms_norm_eps);
+        Tensor gate = linear(normed2, weights_.get(layer_key(l, "mlp.gate_proj.weight")));
+        Tensor up = linear(normed2, weights_.get(layer_key(l, "mlp.up_proj.weight")));
+        Tensor act = silu_mul(gate, up);
+        Tensor down = linear(act, weights_.get(layer_key(l, "mlp.down_proj.weight")));
+        add_inplace(x, down);
+    }
+
+    for (int64_t i = 0; i < num_items; ++i) {
+        manager.commit(*items[static_cast<std::size_t>(i)].blocks,
+                       len[static_cast<std::size_t>(i)]);
+    }
+
+    Tensor normed = rms_norm(x, weights_.get("model.norm.weight"), c.rms_norm_eps);
+
+    // Only the last token of each item drives next-token prediction, so project just those rows.
+    const int64_t h = c.hidden_size;
+    Tensor last_hidden({num_items, h});
+    for (int64_t i = 0; i < num_items; ++i) {
+        const auto si = static_cast<std::size_t>(i);
+        const int64_t last_row = offset[si] + len[si] - 1;
+        std::memcpy(last_hidden.data() + i * h,
+                    normed.data() + last_row * h,
+                    sizeof(float) * static_cast<std::size_t>(h));
+    }
+    const Tensor& lm_head =
+        weights_.contains("lm_head.weight") ? weights_.get("lm_head.weight") : embed;
+    return linear(last_hidden, lm_head); // [num_items, vocab_size]
 }
 
 } // namespace engine
