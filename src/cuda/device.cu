@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "engine/cuda/device.hpp"
+#include "engine/cuda/kernels.hpp"
 
 #include <cmath>
 #include <cublas_v2.h>
@@ -22,17 +23,42 @@ void cublas_check(cublasStatus_t status, const char* what) {
     }
 }
 
-__global__ void add_bias_kernel(float* y, const float* bias, int64_t rows, int64_t out_dim) {
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx < rows * out_dim) {
-        y[idx] += bias[idx % out_dim];
-    }
+constexpr int kThreads = 256;
+constexpr int kMaxHeadDim = 256;
+
+int grid_for(int64_t work, int threads) {
+    return static_cast<int>((work + threads - 1) / threads);
 }
 
 __global__ void saxpy_kernel(float a, const float* x, const float* y, float* out, int64_t n) {
     const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) {
         out[i] = a * x[i] + y[i];
+    }
+}
+
+__global__ void embedding_kernel(
+    const float* weight, const int64_t* ids, float* out, int64_t n_ids, int64_t hidden) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n_ids * hidden) {
+        return;
+    }
+    const int64_t row = idx / hidden;
+    const int64_t col = idx % hidden;
+    out[idx] = weight[ids[row] * hidden + col];
+}
+
+__global__ void add_inplace_kernel(float* x, const float* y, int64_t n) {
+    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) {
+        x[i] += y[i];
+    }
+}
+
+__global__ void add_bias_kernel(float* y, const float* bias, int64_t rows, int64_t out_dim) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < rows * out_dim) {
+        y[idx] += bias[idx % out_dim];
     }
 }
 
@@ -109,8 +135,6 @@ __global__ void rope_kernel(
 
 // One thread per (head, query). Causal softmax-weighted sum over keys 0..query_offset+i, computed
 // in double with a single-pass online softmax (algebraically identical to the CPU two-pass).
-constexpr int kMaxHeadDim = 256;
-
 __global__ void attention_kernel(const float* q,
                                  const float* k,
                                  const float* v,
@@ -166,6 +190,121 @@ __global__ void attention_kernel(const float* q,
 
 } // namespace
 
+namespace kernels {
+
+void embedding(const float* weight, const int64_t* ids, float* out, int64_t n_ids, int64_t hidden) {
+    if (n_ids <= 0 || hidden <= 0) {
+        return;
+    }
+    embedding_kernel<<<grid_for(n_ids * hidden, kThreads), kThreads>>>(
+        weight, ids, out, n_ids, hidden);
+    check(cudaGetLastError(), "launch embedding");
+}
+
+void rms_norm(
+    const float* x, const float* weight, float* out, int64_t rows, int64_t dim, double eps) {
+    if (rows <= 0 || dim <= 0) {
+        return;
+    }
+    const auto shared_bytes = sizeof(double) * static_cast<std::size_t>(kThreads);
+    rms_norm_kernel<<<static_cast<int>(rows), kThreads, shared_bytes>>>(x, weight, out, dim, eps);
+    check(cudaGetLastError(), "launch rms_norm");
+}
+
+void silu_mul(const float* gate, const float* up, float* out, int64_t n) {
+    if (n <= 0) {
+        return;
+    }
+    silu_mul_kernel<<<grid_for(n, kThreads), kThreads>>>(gate, up, out, n);
+    check(cudaGetLastError(), "launch silu_mul");
+}
+
+void add_inplace(float* x, const float* y, int64_t n) {
+    if (n <= 0) {
+        return;
+    }
+    add_inplace_kernel<<<grid_for(n, kThreads), kThreads>>>(x, y, n);
+    check(cudaGetLastError(), "launch add_inplace");
+}
+
+void rope(float* x,
+          int64_t rows,
+          int64_t n_heads,
+          int64_t head_dim,
+          double theta,
+          const int64_t* positions) {
+    if (rows <= 0 || n_heads <= 0 || head_dim <= 0) {
+        return;
+    }
+    const int64_t work = rows * n_heads * (head_dim / 2);
+    rope_kernel<<<grid_for(work, kThreads), kThreads>>>(
+        x, rows, n_heads, head_dim, theta, positions);
+    check(cudaGetLastError(), "launch rope");
+}
+
+void linear(cublasHandle_t handle,
+            const float* x,
+            const float* weight,
+            const float* bias,
+            float* y,
+            int64_t rows,
+            int64_t in_dim,
+            int64_t out_dim) {
+    if (rows <= 0 || in_dim <= 0 || out_dim <= 0) {
+        return;
+    }
+    // Strict IEEE fp32 (no TF32 tensor cores) so results match the CPU Eigen GEMM. Row-major
+    // y = x * weight^T equals, in cuBLAS column-major, y' = weight'^T * x'.
+    cublas_check(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH), "set math mode");
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    cublas_check(cublasSgemm(handle,
+                             CUBLAS_OP_T,
+                             CUBLAS_OP_N,
+                             static_cast<int>(out_dim),
+                             static_cast<int>(rows),
+                             static_cast<int>(in_dim),
+                             &alpha,
+                             weight,
+                             static_cast<int>(in_dim),
+                             x,
+                             static_cast<int>(in_dim),
+                             &beta,
+                             y,
+                             static_cast<int>(out_dim)),
+                 "sgemm");
+    if (bias != nullptr) {
+        add_bias_kernel<<<grid_for(rows * out_dim, kThreads), kThreads>>>(y, bias, rows, out_dim);
+        check(cudaGetLastError(), "launch add_bias");
+    }
+}
+
+void attention(const float* q,
+               const float* k,
+               const float* v,
+               float* out,
+               int64_t q_len,
+               int64_t total,
+               int64_t n_heads,
+               int64_t n_kv_heads,
+               int64_t head_dim,
+               int64_t query_offset) {
+    if (q_len <= 0 || total <= 0) {
+        return;
+    }
+    if (head_dim > kMaxHeadDim) {
+        throw std::runtime_error("cuda attention: head_dim exceeds supported maximum");
+    }
+    const double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
+    attention_kernel<<<grid_for(n_heads * q_len, kThreads), kThreads>>>(
+        q, k, v, out, q_len, n_heads, n_kv_heads, head_dim, query_offset, scale);
+    check(cudaGetLastError(), "launch attention");
+}
+
+} // namespace kernels
+
+// --- Host copy-in / copy-out wrappers (used by tests and standalone callers) ---
+
 int device_count() {
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess) {
@@ -187,16 +326,56 @@ void saxpy(float a, const float* x, const float* y, float* out, int64_t n) {
     check(cudaMalloc(&dout, bytes), "malloc out");
     check(cudaMemcpy(dx, x, bytes, cudaMemcpyHostToDevice), "copy x");
     check(cudaMemcpy(dy, y, bytes, cudaMemcpyHostToDevice), "copy y");
-
-    const int threads = 256;
-    const int blocks = static_cast<int>((n + threads - 1) / threads);
-    saxpy_kernel<<<blocks, threads>>>(a, dx, dy, dout, n);
+    saxpy_kernel<<<grid_for(n, kThreads), kThreads>>>(a, dx, dy, dout, n);
     check(cudaGetLastError(), "launch saxpy");
     check(cudaMemcpy(out, dout, bytes, cudaMemcpyDeviceToHost), "copy out");
-
     cudaFree(dx);
     cudaFree(dy);
     cudaFree(dout);
+}
+
+void embedding(const float* weight,
+               int64_t vocab,
+               int64_t hidden,
+               const int64_t* ids,
+               int64_t n_ids,
+               float* out) {
+    if (n_ids <= 0 || hidden <= 0 || vocab <= 0) {
+        return;
+    }
+    const auto w_bytes = sizeof(float) * static_cast<std::size_t>(vocab * hidden);
+    const auto id_bytes = sizeof(int64_t) * static_cast<std::size_t>(n_ids);
+    const auto out_bytes = sizeof(float) * static_cast<std::size_t>(n_ids * hidden);
+    float* dweight = nullptr;
+    int64_t* dids = nullptr;
+    float* dout = nullptr;
+    check(cudaMalloc(&dweight, w_bytes), "malloc weight");
+    check(cudaMalloc(&dids, id_bytes), "malloc ids");
+    check(cudaMalloc(&dout, out_bytes), "malloc out");
+    check(cudaMemcpy(dweight, weight, w_bytes, cudaMemcpyHostToDevice), "copy weight");
+    check(cudaMemcpy(dids, ids, id_bytes, cudaMemcpyHostToDevice), "copy ids");
+    kernels::embedding(dweight, dids, dout, n_ids, hidden);
+    check(cudaMemcpy(out, dout, out_bytes, cudaMemcpyDeviceToHost), "copy out");
+    cudaFree(dweight);
+    cudaFree(dids);
+    cudaFree(dout);
+}
+
+void add_inplace(float* x, const float* y, int64_t n) {
+    if (n <= 0) {
+        return;
+    }
+    const auto bytes = sizeof(float) * static_cast<std::size_t>(n);
+    float* dx = nullptr;
+    float* dy = nullptr;
+    check(cudaMalloc(&dx, bytes), "malloc x");
+    check(cudaMalloc(&dy, bytes), "malloc y");
+    check(cudaMemcpy(dx, x, bytes, cudaMemcpyHostToDevice), "copy x");
+    check(cudaMemcpy(dy, y, bytes, cudaMemcpyHostToDevice), "copy y");
+    kernels::add_inplace(dx, dy, n);
+    check(cudaMemcpy(x, dx, bytes, cudaMemcpyDeviceToHost), "copy x back");
+    cudaFree(dx);
+    cudaFree(dy);
 }
 
 void rms_norm(
@@ -214,13 +393,8 @@ void rms_norm(
     check(cudaMalloc(&dout, x_bytes), "malloc out");
     check(cudaMemcpy(dx, x, x_bytes, cudaMemcpyHostToDevice), "copy x");
     check(cudaMemcpy(dw, weight, w_bytes, cudaMemcpyHostToDevice), "copy weight");
-
-    const int threads = 256;
-    const auto shared_bytes = sizeof(double) * static_cast<std::size_t>(threads);
-    rms_norm_kernel<<<static_cast<int>(rows), threads, shared_bytes>>>(dx, dw, dout, dim, eps);
-    check(cudaGetLastError(), "launch rms_norm");
+    kernels::rms_norm(dx, dw, dout, rows, dim, eps);
     check(cudaMemcpy(out, dout, x_bytes, cudaMemcpyDeviceToHost), "copy out");
-
     cudaFree(dx);
     cudaFree(dw);
     cudaFree(dout);
@@ -239,13 +413,8 @@ void silu_mul(const float* gate, const float* up, float* out, int64_t n) {
     check(cudaMalloc(&dout, bytes), "malloc out");
     check(cudaMemcpy(dgate, gate, bytes, cudaMemcpyHostToDevice), "copy gate");
     check(cudaMemcpy(dup, up, bytes, cudaMemcpyHostToDevice), "copy up");
-
-    const int threads = 256;
-    const int blocks = static_cast<int>((n + threads - 1) / threads);
-    silu_mul_kernel<<<blocks, threads>>>(dgate, dup, dout, n);
-    check(cudaGetLastError(), "launch silu_mul");
+    kernels::silu_mul(dgate, dup, dout, n);
     check(cudaMemcpy(out, dout, bytes, cudaMemcpyDeviceToHost), "copy out");
-
     cudaFree(dgate);
     cudaFree(dup);
     cudaFree(dout);
@@ -269,14 +438,8 @@ void rope(float* x,
     check(cudaMalloc(&dpos, pos_bytes), "malloc positions");
     check(cudaMemcpy(dx, x, x_bytes, cudaMemcpyHostToDevice), "copy x");
     check(cudaMemcpy(dpos, positions, pos_bytes, cudaMemcpyHostToDevice), "copy positions");
-
-    const int64_t work = rows * n_heads * (head_dim / 2);
-    const int threads = 256;
-    const int blocks = static_cast<int>((work + threads - 1) / threads);
-    rope_kernel<<<blocks, threads>>>(dx, rows, n_heads, head_dim, theta, dpos);
-    check(cudaGetLastError(), "launch rope");
+    kernels::rope(dx, rows, n_heads, head_dim, theta, dpos);
     check(cudaMemcpy(x, dx, x_bytes, cudaMemcpyDeviceToHost), "copy x back");
-
     cudaFree(dx);
     cudaFree(dpos);
 }
@@ -311,41 +474,10 @@ void linear(const float* x,
                          cudaMemcpyHostToDevice),
               "copy bias");
     }
-
     cublasHandle_t handle = nullptr;
     cublas_check(cublasCreate(&handle), "create handle");
-    // Strict IEEE fp32 (no TF32 tensor cores) so results match the CPU Eigen GEMM.
-    cublas_check(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH), "set math mode");
-
-    // Row-major y = x * weight^T equals, in cuBLAS column-major, y' = weight'^T * x' where the
-    // row-major buffers are read directly as their column-major transposes.
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-    cublas_check(cublasSgemm(handle,
-                             CUBLAS_OP_T,
-                             CUBLAS_OP_N,
-                             static_cast<int>(out_dim),
-                             static_cast<int>(rows),
-                             static_cast<int>(in_dim),
-                             &alpha,
-                             dw,
-                             static_cast<int>(in_dim),
-                             dx,
-                             static_cast<int>(in_dim),
-                             &beta,
-                             dy,
-                             static_cast<int>(out_dim)),
-                 "sgemm");
-
-    if (dbias != nullptr) {
-        const int threads = 256;
-        const int blocks = static_cast<int>((rows * out_dim + threads - 1) / threads);
-        add_bias_kernel<<<blocks, threads>>>(dy, dbias, rows, out_dim);
-        check(cudaGetLastError(), "launch add_bias");
-    }
-
+    kernels::linear(handle, dx, dw, dbias, dy, rows, in_dim, out_dim);
     check(cudaMemcpy(y, dy, y_bytes, cudaMemcpyDeviceToHost), "copy y");
-
     cublasDestroy(handle);
     cudaFree(dx);
     cudaFree(dw);
@@ -366,9 +498,6 @@ void attention(const float* q,
     if (q_len <= 0 || total <= 0) {
         return;
     }
-    if (head_dim > kMaxHeadDim) {
-        throw std::runtime_error("cuda attention: head_dim exceeds supported maximum");
-    }
     const int64_t q_dim = n_heads * head_dim;
     const int64_t kv_dim = n_kv_heads * head_dim;
     const auto q_bytes = sizeof(float) * static_cast<std::size_t>(q_len * q_dim);
@@ -384,16 +513,8 @@ void attention(const float* q,
     check(cudaMemcpy(dq, q, q_bytes, cudaMemcpyHostToDevice), "copy q");
     check(cudaMemcpy(dk, k, kv_bytes, cudaMemcpyHostToDevice), "copy k");
     check(cudaMemcpy(dv, v, kv_bytes, cudaMemcpyHostToDevice), "copy v");
-
-    const double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
-    const int64_t work = n_heads * q_len;
-    const int threads = 128;
-    const int blocks = static_cast<int>((work + threads - 1) / threads);
-    attention_kernel<<<blocks, threads>>>(
-        dq, dk, dv, dout, q_len, n_heads, n_kv_heads, head_dim, query_offset, scale);
-    check(cudaGetLastError(), "launch attention");
+    kernels::attention(dq, dk, dv, dout, q_len, total, n_heads, n_kv_heads, head_dim, query_offset);
     check(cudaMemcpy(out, dout, q_bytes, cudaMemcpyDeviceToHost), "copy out");
-
     cudaFree(dq);
     cudaFree(dk);
     cudaFree(dv);

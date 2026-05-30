@@ -60,4 +60,16 @@ void attention(const float* q,
                int64_t head_dim,
                int64_t query_offset);
 
+// Embedding gather: out[i, :] = weight[ids[i], :]; weight is [vocab, hidden], out is [n_ids,
+// hidden].
+void embedding(const float* weight,
+               int64_t vocab,
+               int64_t hidden,
+               const int64_t* ids,
+               int64_t n_ids,
+               float* out);
+
+// x[i] += y[i] over n elements (residual add).
+void add_inplace(float* x, const float* y, int64_t n);
+
 } // namespace engine::cuda

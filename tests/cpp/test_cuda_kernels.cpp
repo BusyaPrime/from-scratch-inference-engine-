@@ -162,3 +162,37 @@ TEST(CudaKernels, AttentionPrefillMatchesCpu) {
 TEST(CudaKernels, AttentionDecodeMatchesCpu) {
     check_attention(/*q_len=*/1, /*total=*/20, /*query_offset=*/19, /*seed=*/29);
 }
+
+// Embedding gather is an exact copy, so it must match the CPU reference bit for bit.
+TEST(CudaKernels, EmbeddingMatchesCpu) {
+    std::mt19937 rng(31);
+    const int64_t vocab = 50;
+    const int64_t hidden = 896;
+    const engine::Tensor weight = random_tensor({vocab, hidden}, rng);
+    const std::vector<int64_t> ids = {3, 17, 0, 49, 17, 8};
+
+    const engine::Tensor reference = engine::embedding(weight, ids);
+    std::vector<float> out(ids.size() * static_cast<std::size_t>(hidden));
+    engine::cuda::embedding(
+        weight.data(), vocab, hidden, ids.data(), static_cast<int64_t>(ids.size()), out.data());
+
+    for (int64_t i = 0; i < static_cast<int64_t>(ids.size()) * hidden; ++i) {
+        EXPECT_FLOAT_EQ(out[static_cast<std::size_t>(i)], reference.data()[i]) << "index " << i;
+    }
+}
+
+// Residual add in fp32 is exact.
+TEST(CudaKernels, AddInplaceMatchesCpu) {
+    std::mt19937 rng(37);
+    const int64_t n = 2048;
+    const engine::Tensor x = random_tensor({n}, rng);
+    const engine::Tensor y = random_tensor({n}, rng);
+
+    std::vector<float> out(x.data(), x.data() + n);
+    engine::cuda::add_inplace(out.data(), y.data(), n);
+
+    for (int64_t i = 0; i < n; ++i) {
+        EXPECT_FLOAT_EQ(out[static_cast<std::size_t>(i)], x.data()[i] + y.data()[i])
+            << "index " << i;
+    }
+}
