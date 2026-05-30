@@ -15,20 +15,27 @@ std::vector<int64_t> step_tokens(const EngineSequence& seq) {
     if (seq.prefilled) {
         return {seq.output.back()};
     }
-    std::vector<int64_t> tokens = seq.request.prompt;
-    tokens.insert(tokens.end(), seq.output.begin(), seq.output.end());
-    return tokens;
+    std::vector<int64_t> ctx = seq.request.prompt;
+    ctx.insert(ctx.end(), seq.output.begin(), seq.output.end());
+    // Skip the leading tokens already covered by shared/cached prefix blocks (blocks.length); a
+    // fresh sequence has length 0 and prefills the whole context.
+    const auto skip = static_cast<std::ptrdiff_t>(seq.blocks.length);
+    return std::vector<int64_t>(ctx.begin() + skip, ctx.end());
 }
 
 } // namespace
 
-Engine::Engine(
-    const Model& model, int64_t block_size, int64_t num_blocks, uint64_t seed, int64_t max_batch)
+Engine::Engine(const Model& model,
+               int64_t block_size,
+               int64_t num_blocks,
+               uint64_t seed,
+               int64_t max_batch,
+               bool enable_prefix_cache)
     : model_(model), manager_(model.config().num_hidden_layers,
                               model.config().num_key_value_heads * model.config().head_dim,
                               block_size,
                               num_blocks),
-      sampler_(seed), max_batch_(max_batch) {}
+      sampler_(seed), max_batch_(max_batch), prefix_cache_(enable_prefix_cache) {}
 
 int64_t Engine::add_request(Request request) {
     if (request.prompt.empty()) {
@@ -44,8 +51,9 @@ int64_t Engine::add_request(Request request) {
 }
 
 void Engine::step() {
-    // Admit waiting requests (FCFS) while the batch cap and free pool allow. A prompt that does
-    // not fit the whole pool stays queued; FCFS stops at the first that cannot be admitted.
+    // Admit waiting requests (FCFS). For a fresh or recomputing sequence, first try to share a
+    // cached prompt prefix (reference-counted, not reallocated), capped to leave at least one token
+    // for the forward to produce logits; only the uncached suffix is then prefilled.
     while (!waiting_.empty() && static_cast<int64_t>(running_.size()) < max_batch_) {
         const int64_t id = waiting_.front();
         EngineSequence& seq = sequences_.at(id);
@@ -65,12 +73,30 @@ void Engine::step() {
     // resumed.
     std::vector<BatchItem> items;
     std::vector<int64_t> batched_ids;
+    std::vector<char> was_prefill;
+    std::vector<std::vector<int64_t>> prefill_ctx;
     for (;;) {
         items.clear();
         batched_ids.clear();
+        was_prefill.clear();
+        prefill_ctx.clear();
         int64_t budget = manager_.free_blocks();
         for (const int64_t id : running_) {
             EngineSequence& seq = sequences_.at(id);
+            // Share a cached prompt prefix once, when a running sequence first needs blocks (capped
+            // to leave at least one token so the forward still yields logits). Only running
+            // sequences acquire, so a sequence that cannot be batched this step never strands
+            // blocks.
+            if (prefix_cache_ && !seq.prefilled && seq.blocks.block_table.empty()) {
+                std::vector<int64_t> ctx = seq.request.prompt;
+                ctx.insert(ctx.end(), seq.output.begin(), seq.output.end());
+                const int64_t bs = manager_.block_size();
+                const int64_t cap = ((static_cast<int64_t>(ctx.size()) - 1) / bs) * bs;
+                if (cap > 0) {
+                    manager_.acquire_shared_prefix(
+                        seq.blocks, std::vector<int64_t>(ctx.begin(), ctx.begin() + cap));
+                }
+            }
             std::vector<int64_t> tokens = step_tokens(seq);
             const auto need = static_cast<int64_t>(tokens.size());
             const auto have = static_cast<int64_t>(seq.blocks.block_table.size());
@@ -79,6 +105,15 @@ void Engine::step() {
                 continue; // cannot grow within the remaining pool this step
             }
             budget -= delta;
+            const bool prefill = !seq.prefilled;
+            was_prefill.push_back(prefill ? 1 : 0);
+            if (prefill && prefix_cache_) {
+                std::vector<int64_t> ctx = seq.request.prompt;
+                ctx.insert(ctx.end(), seq.output.begin(), seq.output.end());
+                prefill_ctx.push_back(std::move(ctx)); // context to register after prefill
+            } else {
+                prefill_ctx.emplace_back();
+            }
             items.push_back({&seq.blocks, std::move(tokens)});
             batched_ids.push_back(id);
         }
@@ -106,6 +141,9 @@ void Engine::step() {
             seq.status = SeqStatus::Finished;
             manager_.free(seq.blocks);
             any_finished = true;
+        } else if (prefix_cache_ && was_prefill[k] != 0) {
+            // Cache this sequence's freshly prefilled full blocks for later sequences to share.
+            manager_.register_prefix(seq.blocks, prefill_ctx[k]);
         }
     }
 
