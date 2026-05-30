@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "engine/cuda/kernels.hpp"
+#include "engine/cuda/kv_cache.hpp"
 #include "engine/cuda/model.hpp"
 
 #include <cublas_v2.h>
@@ -115,9 +116,10 @@ struct CudaModel::Impl {
     }
 
     [[nodiscard]] Tensor forward(const std::vector<int64_t>& ids) const;
+    [[nodiscard]] Tensor forward_cached(const std::vector<int64_t>& ids, GpuKVCache& cache) const;
 };
 
-Tensor CudaModel::Impl::forward(const std::vector<int64_t>& ids) const {
+Tensor CudaModel::Impl::forward_cached(const std::vector<int64_t>& ids, GpuKVCache& cache) const {
     const ModelConfig& c = config;
     const auto seq = static_cast<int64_t>(ids.size());
     if (seq == 0) {
@@ -137,9 +139,10 @@ Tensor CudaModel::Impl::forward(const std::vector<int64_t>& ids) const {
                           static_cast<std::size_t>(seq) * sizeof(int64_t),
                           cudaMemcpyHostToDevice),
                "copy ids");
+    const int64_t past = cache.length();
     std::vector<int64_t> positions(static_cast<std::size_t>(seq));
     for (int64_t i = 0; i < seq; ++i) {
-        positions[static_cast<std::size_t>(i)] = i;
+        positions[static_cast<std::size_t>(i)] = past + i;
     }
     DeviceArray<int64_t> d_pos(seq);
     cuda_check(cudaMemcpy(d_pos.get(),
@@ -206,16 +209,17 @@ Tensor CudaModel::Impl::forward(const std::vector<int64_t>& ids) const {
         kernels::rope(d_q.get(), seq, c.num_attention_heads, c.head_dim, theta, d_pos.get());
         kernels::rope(d_k.get(), seq, c.num_key_value_heads, c.head_dim, theta, d_pos.get());
 
+        cache.append(l, d_k.get(), d_v.get(), seq);
         kernels::attention(d_q.get(),
-                           d_k.get(),
-                           d_v.get(),
+                           cache.key_ptr(l),
+                           cache.value_ptr(l),
                            d_attn.get(),
                            seq,
-                           seq,
+                           past + seq,
                            c.num_attention_heads,
                            c.num_key_value_heads,
                            c.head_dim,
-                           /*query_offset=*/0);
+                           past);
         kernels::linear(handle,
                         d_attn.get(),
                         weight(layer_key(l, "self_attn.o_proj.weight")),
@@ -259,6 +263,7 @@ Tensor CudaModel::Impl::forward(const std::vector<int64_t>& ids) const {
                         hidden);
         kernels::add_inplace(d_x.get(), d_down.get(), seq * hidden);
     }
+    cache.advance(seq);
 
     kernels::rms_norm(d_x.get(), weight("model.norm.weight"), d_normed.get(), seq, hidden, eps);
     const float* lm_head = has("lm_head.weight") ? weight("lm_head.weight") : embed;
@@ -275,6 +280,13 @@ Tensor CudaModel::Impl::forward(const std::vector<int64_t>& ids) const {
     return out;
 }
 
+Tensor CudaModel::Impl::forward(const std::vector<int64_t>& ids) const {
+    GpuKVCache cache(config.num_hidden_layers,
+                     config.num_key_value_heads * config.head_dim,
+                     static_cast<int64_t>(ids.size()));
+    return forward_cached(ids, cache);
+}
+
 CudaModel::CudaModel(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 CudaModel::~CudaModel() = default;
 CudaModel::CudaModel(CudaModel&&) noexcept = default;
@@ -286,6 +298,10 @@ const ModelConfig& CudaModel::config() const noexcept {
 
 Tensor CudaModel::forward(const std::vector<int64_t>& ids) const {
     return impl_->forward(ids);
+}
+
+Tensor CudaModel::forward_with_cache(const std::vector<int64_t>& ids, GpuKVCache& cache) const {
+    return impl_->forward_cached(ids, cache);
 }
 
 CudaModel CudaModel::from_safetensors(ModelConfig config, const SafeTensors& weights) {

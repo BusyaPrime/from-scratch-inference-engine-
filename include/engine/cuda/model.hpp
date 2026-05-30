@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "engine/cuda/kv_cache.hpp"
 #include "engine/model_config.hpp"
 #include "engine/safetensors.hpp"
 #include "engine/tensor.hpp"
@@ -28,6 +29,11 @@ public:
 
     // Forward one sequence of token ids -> logits [seq_len, vocab_size].
     [[nodiscard]] Tensor forward(const std::vector<int64_t>& ids) const;
+
+    // Cached forward: append this chunk's K/V to the device cache and attend over the whole cache,
+    // so a prefill chunk followed by single-token steps reproduces the full forward on the GPU.
+    [[nodiscard]] Tensor forward_with_cache(const std::vector<int64_t>& ids,
+                                            GpuKVCache& cache) const;
 
     [[nodiscard]] const ModelConfig& config() const noexcept;
 
