@@ -57,3 +57,28 @@ TEST(CudaKernels, SiluMulMatchesCpu) {
         EXPECT_NEAR(out[static_cast<std::size_t>(i)], reference.data()[i], 1e-4f) << "index " << i;
     }
 }
+
+// The GPU RoPE must reproduce the CPU half-rotation layout in place.
+TEST(CudaKernels, RopeMatchesCpu) {
+    std::mt19937 rng(13);
+    const int64_t rows = 6;
+    const int64_t n_heads = 14; // Qwen2.5-0.5B query heads
+    const int64_t head_dim = 64;
+    const double theta = 1.0e6;
+
+    const engine::Tensor x = random_tensor({rows, n_heads * head_dim}, rng);
+    std::vector<int64_t> positions(static_cast<std::size_t>(rows));
+    for (int64_t t = 0; t < rows; ++t) {
+        positions[static_cast<std::size_t>(t)] = t + 3; // arbitrary non-zero offset
+    }
+
+    engine::Tensor reference = x; // copy, then rotate on the CPU
+    engine::rope_inplace(reference, n_heads, head_dim, theta, positions);
+
+    std::vector<float> gpu(x.data(), x.data() + x.numel());
+    engine::cuda::rope(gpu.data(), rows, n_heads, head_dim, theta, positions.data());
+
+    for (int64_t i = 0; i < x.numel(); ++i) {
+        EXPECT_NEAR(gpu[static_cast<std::size_t>(i)], reference.data()[i], 1e-4f) << "index " << i;
+    }
+}

@@ -25,4 +25,14 @@ void rms_norm(
 // CPU twin. gate, up, and out are all length n.
 void silu_mul(const float* gate, const float* up, float* out, int64_t n);
 
+// In-place rotary position embedding over x[rows, n_heads*head_dim] using the Hugging Face
+// half-rotation layout; angles computed in double to match the CPU twin. positions has length
+// rows.
+void rope(float* x,
+          int64_t rows,
+          int64_t n_heads,
+          int64_t head_dim,
+          double theta,
+          const int64_t* positions);
+
 } // namespace engine::cuda

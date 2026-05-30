@@ -63,6 +63,35 @@ __global__ void silu_mul_kernel(const float* gate, const float* up, float* out, 
     }
 }
 
+// One thread per rotation pair (row, head, i<half). In place is safe because each thread owns the
+// distinct indices i and i+half within its head.
+__global__ void rope_kernel(
+    float* x, int64_t rows, int64_t n_heads, int64_t head_dim, double theta, const int64_t* pos) {
+    const int64_t half = head_dim / 2;
+    const int64_t per_row = n_heads * half;
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= rows * per_row) {
+        return;
+    }
+    const int64_t t = idx / per_row;
+    const int64_t rem = idx % per_row;
+    const int64_t hh = rem / half;
+    const int64_t i = rem % half;
+
+    const double position = static_cast<double>(pos[t]);
+    const double inv_freq =
+        pow(theta, -2.0 * static_cast<double>(i) / static_cast<double>(head_dim));
+    const double angle = position * inv_freq;
+    const double c = cos(angle);
+    const double s = sin(angle);
+
+    float* head = x + t * n_heads * head_dim + hh * head_dim;
+    const float x1 = head[i];
+    const float x2 = head[i + half];
+    head[i] = static_cast<float>(static_cast<double>(x1) * c - static_cast<double>(x2) * s);
+    head[i + half] = static_cast<float>(static_cast<double>(x2) * c + static_cast<double>(x1) * s);
+}
+
 } // namespace
 
 int device_count() {
@@ -148,6 +177,36 @@ void silu_mul(const float* gate, const float* up, float* out, int64_t n) {
     cudaFree(dgate);
     cudaFree(dup);
     cudaFree(dout);
+}
+
+void rope(float* x,
+          int64_t rows,
+          int64_t n_heads,
+          int64_t head_dim,
+          double theta,
+          const int64_t* positions) {
+    if (rows <= 0 || n_heads <= 0 || head_dim <= 0) {
+        return;
+    }
+    const int64_t dim = n_heads * head_dim;
+    const auto x_bytes = sizeof(float) * static_cast<std::size_t>(rows * dim);
+    const auto pos_bytes = sizeof(int64_t) * static_cast<std::size_t>(rows);
+    float* dx = nullptr;
+    int64_t* dpos = nullptr;
+    check(cudaMalloc(&dx, x_bytes), "malloc x");
+    check(cudaMalloc(&dpos, pos_bytes), "malloc positions");
+    check(cudaMemcpy(dx, x, x_bytes, cudaMemcpyHostToDevice), "copy x");
+    check(cudaMemcpy(dpos, positions, pos_bytes, cudaMemcpyHostToDevice), "copy positions");
+
+    const int64_t work = rows * n_heads * (head_dim / 2);
+    const int threads = 256;
+    const int blocks = static_cast<int>((work + threads - 1) / threads);
+    rope_kernel<<<blocks, threads>>>(dx, rows, n_heads, head_dim, theta, dpos);
+    check(cudaGetLastError(), "launch rope");
+    check(cudaMemcpy(x, dx, x_bytes, cudaMemcpyDeviceToHost), "copy x back");
+
+    cudaFree(dx);
+    cudaFree(dpos);
 }
 
 } // namespace engine::cuda
