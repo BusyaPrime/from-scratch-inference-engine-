@@ -99,8 +99,8 @@ private:
     };
     [[nodiscard]] static uint64_t hash_block(uint64_t parent, const int64_t* tokens, int64_t n);
 
-    // Allocate a block, first evicting the least-recently-used unshared cached prefix if the pool is
-    // exhausted. Throws only if nothing can be freed.
+    // Allocate a block; if the pool is exhausted, first evict the LRU unshared cached prefix.
+    // Throws only if nothing can be freed.
     int64_t allocate_block();
     // Free the LRU cached prefix block whose only holder is the cache (reference count 1).
     void evict_lru();
