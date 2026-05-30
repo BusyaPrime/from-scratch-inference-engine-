@@ -15,8 +15,13 @@ tokens. The C++ suite additionally proves that cached decode, paged attention, a
 decode each reproduce the plain forward exactly, and that a preempted-and-recomputed sequence
 matches its uninterrupted output.
 
-CUDA kernels and the head-to-head comparison against `nano-vllm` and `vllm` land in the next
-phase; the figures below are from the fp32 CPU reference path.
+The CUDA path is now in: hand-written kernels for RMSNorm, SwiGLU, RoPE, causal grouped-query
+attention, embedding gather, and the residual add, plus cuBLAS for GEMM, and a device-resident
+forward that keeps activations on the GPU across layers. Every kernel is checked against its CPU
+twin, and the full GPU forward matches the CPU forward (and so, transitively, `transformers`).
+Still ahead: a cached GPU decode and wiring the GPU path into the continuous-batching engine, then
+GPU benchmarks and the head-to-head against `nano-vllm` and `vllm`. The figures below are from the
+fp32 CPU reference path.
 
 ## Benchmarks
 
