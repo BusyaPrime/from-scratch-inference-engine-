@@ -61,7 +61,9 @@ class LLM:
         return engine_ext.SamplingParams(config.temperature, config.top_k, config.top_p)
 
     def generate_ids(self, prompt_ids: list[int], config: GenerationConfig) -> list[int]:
-        return self.engine.generate(prompt_ids, self._params(config), config.max_tokens, self.eos_id)
+        return self.engine.generate(
+            prompt_ids, self._params(config), config.max_tokens, self.eos_id
+        )
 
     def generate(self, prompt: str, config: GenerationConfig | None = None) -> str:
         config = config or GenerationConfig()
