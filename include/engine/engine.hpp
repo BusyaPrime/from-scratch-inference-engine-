@@ -58,6 +58,9 @@ public:
     [[nodiscard]] const std::vector<int64_t>& output(int64_t id) const;
     [[nodiscard]] SeqStatus status(int64_t id) const;
 
+    // Total preemptions so far (a sequence evicted under memory pressure and later recomputed).
+    [[nodiscard]] int64_t preemptions() const noexcept { return preemptions_; }
+
     // Convenience: drive the engine until a single fresh request completes; returns its tokens.
     std::vector<int64_t> generate(const std::vector<int64_t>& prompt,
                                   const SamplingParams& params,
@@ -65,6 +68,10 @@ public:
                                   int64_t eos_id = -1);
 
 private:
+    // Free the youngest block-holding running sequence so others can proceed; returns false if no
+    // running sequence holds blocks. The freed sequence recomputes from prompt + output on resume.
+    bool preempt_youngest();
+
     const Model& model_;
     BlockManager manager_;
     Sampler sampler_;
@@ -73,6 +80,7 @@ private:
     std::vector<int64_t> running_;
     std::unordered_map<int64_t, EngineSequence> sequences_;
     int64_t next_id_ = 0;
+    int64_t preemptions_ = 0;
 };
 
 } // namespace engine

@@ -1,10 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "engine/engine.hpp"
 
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 
 namespace engine {
+namespace {
+
+// Tokens to feed a sequence this step. A fresh or recomputed sequence re-runs prompt + everything
+// generated so far (recompute rebuilds the freed KV cache); a prefilled sequence decodes its last
+// token.
+std::vector<int64_t> step_tokens(const EngineSequence& seq) {
+    if (seq.prefilled) {
+        return {seq.output.back()};
+    }
+    std::vector<int64_t> tokens = seq.request.prompt;
+    tokens.insert(tokens.end(), seq.output.begin(), seq.output.end());
+    return tokens;
+}
+
+} // namespace
 
 Engine::Engine(
     const Model& model, int64_t block_size, int64_t num_blocks, uint64_t seed, int64_t max_batch)
@@ -33,7 +49,9 @@ void Engine::step() {
     while (!waiting_.empty() && static_cast<int64_t>(running_.size()) < max_batch_) {
         const int64_t id = waiting_.front();
         EngineSequence& seq = sequences_.at(id);
-        if (!manager_.can_append(seq.blocks, static_cast<int64_t>(seq.request.prompt.size()))) {
+        const int64_t need =
+            seq.prefilled ? 1 : static_cast<int64_t>(seq.request.prompt.size() + seq.output.size());
+        if (!manager_.can_append(seq.blocks, need)) {
             break;
         }
         seq.status = SeqStatus::Running;
@@ -41,26 +59,32 @@ void Engine::step() {
         waiting_.pop_front();
     }
 
-    // Assemble the batch: prefill for not-yet-prefilled sequences, one decode token for the rest.
-    // Track a cumulative block budget because every item draws from the same pool this step.
+    // Assemble a batch under a cumulative block budget (every item draws from the same pool this
+    // step). If all running sequences are block-starved and more than one is running, preempt the
+    // youngest block-holding sequence and retry; it recomputes from prompt + generated tokens when
+    // resumed.
     std::vector<BatchItem> items;
     std::vector<int64_t> batched_ids;
-    items.reserve(running_.size());
-    batched_ids.reserve(running_.size());
-    int64_t budget = manager_.free_blocks();
-    for (const int64_t id : running_) {
-        EngineSequence& seq = sequences_.at(id);
-        std::vector<int64_t> tokens =
-            seq.prefilled ? std::vector<int64_t>{seq.output.back()} : seq.request.prompt;
-        const auto need = static_cast<int64_t>(tokens.size());
-        const auto have = static_cast<int64_t>(seq.blocks.block_table.size());
-        const int64_t delta = manager_.blocks_for(seq.blocks.length + need) - have;
-        if (delta > budget) {
-            continue; // cannot grow within the remaining pool this step; retry next step
+    for (;;) {
+        items.clear();
+        batched_ids.clear();
+        int64_t budget = manager_.free_blocks();
+        for (const int64_t id : running_) {
+            EngineSequence& seq = sequences_.at(id);
+            std::vector<int64_t> tokens = step_tokens(seq);
+            const auto need = static_cast<int64_t>(tokens.size());
+            const auto have = static_cast<int64_t>(seq.blocks.block_table.size());
+            const int64_t delta = manager_.blocks_for(seq.blocks.length + need) - have;
+            if (delta > budget) {
+                continue; // cannot grow within the remaining pool this step
+            }
+            budget -= delta;
+            items.push_back({&seq.blocks, std::move(tokens)});
+            batched_ids.push_back(id);
         }
-        budget -= delta;
-        items.push_back({&seq.blocks, std::move(tokens)});
-        batched_ids.push_back(id);
+        if (!items.empty() || running_.size() <= 1 || !preempt_youngest()) {
+            break;
+        }
     }
     if (items.empty()) {
         return;
@@ -95,6 +119,24 @@ void Engine::step() {
         }
         running_ = std::move(still_running);
     }
+}
+
+bool Engine::preempt_youngest() {
+    for (auto it = running_.rbegin(); it != running_.rend(); ++it) {
+        EngineSequence& seq = sequences_.at(*it);
+        if (seq.blocks.block_table.empty()) {
+            continue; // holds no blocks; preempting it would free nothing
+        }
+        manager_.free(seq.blocks);
+        seq.prefilled = false;
+        seq.status = SeqStatus::Waiting;
+        const int64_t id = *it;
+        running_.erase(std::next(it).base());
+        waiting_.push_front(id);
+        ++preemptions_;
+        return true;
+    }
+    return false;
 }
 
 const std::vector<int64_t>& Engine::output(int64_t id) const {

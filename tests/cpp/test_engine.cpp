@@ -98,6 +98,35 @@ TEST(Engine, TightPoolSerializesRequests) {
     EXPECT_EQ(eng.output(id_b), ref_b);
 }
 
+// Under memory pressure the engine must preempt a running sequence (free its blocks) so others can
+// proceed, then recompute the preempted one from prompt + generated tokens and still match.
+TEST(Engine, PreemptionRecomputesAndMatches) {
+    const engine::Model model = tiny::tiny_model();
+    const std::vector<int64_t> pa = {1, 2, 3, 4};
+    const std::vector<int64_t> pb = {5, 6, 7, 8};
+    const int64_t n = 4;
+
+    engine::Engine base_a(model, 4, 64, 9);
+    const std::vector<int64_t> ref_a = base_a.generate(pa, greedy(), n);
+    engine::Engine base_b(model, 4, 64, 9);
+    const std::vector<int64_t> ref_b = base_b.generate(pb, greedy(), n);
+
+    // block_size 4, only 2 blocks: each prompt prefills into one block, then both need a second
+    // block on the same step with none free, which forces a preemption.
+    engine::Engine eng(model, /*block_size=*/4, /*num_blocks=*/2, /*seed=*/9);
+    const int64_t id_a = eng.add_request({pa, greedy(), n, -1});
+    const int64_t id_b = eng.add_request({pb, greedy(), n, -1});
+    int64_t guard = 0;
+    while (eng.has_work() && guard++ < 2000) {
+        eng.step();
+    }
+    EXPECT_GT(eng.preemptions(), 0);
+    EXPECT_EQ(eng.status(id_a), engine::SeqStatus::Finished);
+    EXPECT_EQ(eng.status(id_b), engine::SeqStatus::Finished);
+    EXPECT_EQ(eng.output(id_a), ref_a);
+    EXPECT_EQ(eng.output(id_b), ref_b);
+}
+
 TEST(Engine, EosStopsGeneration) {
     const engine::Model model = tiny::tiny_model();
     const std::vector<int64_t> prompt = {2, 4};
