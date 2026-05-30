@@ -48,6 +48,7 @@ add_library(engine_core STATIC
     src/sampler/sampler.cpp
     src/engine/engine.cpp
     src/engine/speculative.cpp
+    src/engine/tensor_parallel.cpp
     src/quant/quant.cpp)
 target_include_directories(engine_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)

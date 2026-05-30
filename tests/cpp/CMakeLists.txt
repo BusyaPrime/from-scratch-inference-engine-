@@ -35,7 +35,8 @@ add_executable(engine_tests
     test_continuous_batch.cpp
     test_engine.cpp
     test_quant.cpp
-    test_speculative.cpp)
+    test_speculative.cpp
+    test_tensor_parallel.cpp)
 if(ENGINE_ENABLE_CUDA)
     target_sources(engine_tests PRIVATE test_cuda_smoke.cpp test_cuda_kernels.cpp
                                          test_cuda_model.cpp test_cuda_engine.cpp
