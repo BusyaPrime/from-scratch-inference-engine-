@@ -20,6 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 serve = ["fastapi", "uvicorn"]
 dev = ["pytest>=8", "ruff>=0.6", "huggingface_hub>=0.24"]
+parity = ["torch", "transformers"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
@@ -46,3 +47,8 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["engine"]
+
+[tool.pytest.ini_options]
+markers = [
+    "parity: heavy correctness check vs transformers (needs torch and weights)",
+]
