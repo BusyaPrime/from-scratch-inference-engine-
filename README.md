@@ -4,11 +4,36 @@ A from-scratch LLM inference engine. The performance-critical core (model execut
 
 ## Status
 
-Early scaffolding. The CPU reference path is under construction; CUDA kernels and the benchmark numbers below land in later phases. This section is replaced by headline results once the engine runs end to end.
+The CPU reference path runs end to end: safetensors loading, the full Qwen2.5 forward pass, a
+contiguous KV cache, paged attention over a shared block pool, a continuous-batching scheduler
+with preemption and recompute, and sampling. It is exposed to Python and fronted by an
+OpenAI-compatible HTTP server with streaming, plus a latency/throughput benchmark harness.
+
+Correctness is anchored against Hugging Face `transformers` in fp32: per-position logits match
+within `max|Δ| < 1e-3` with identical argmax, and greedy decoding is token-identical out to 64
+tokens. The C++ suite additionally proves that cached decode, paged attention, and batched
+decode each reproduce the plain forward exactly, and that a preempted-and-recomputed sequence
+matches its uninterrupted output.
+
+CUDA kernels and the head-to-head comparison against `nano-vllm` and `vllm` land in the next
+phase; the figures below are from the fp32 CPU reference path.
 
 ## Benchmarks
 
-Pending. Once the CPU and CUDA paths are complete, this section leads with TTFT, TPOT, throughput, and latency percentiles measured against `nano-vllm` and `vllm` on identical hardware, model, and precision, with a full reproducibility manifest. See [benchmarks/](benchmarks/) for the harness and methodology.
+Measured on the fp32 CPU reference path (single-threaded GEMM), Qwen2.5-0.5B-Instruct, greedy
+decoding, 32 output tokens per request. Reproduce with the command under
+[Reproduce the benchmarks](#reproduce-the-benchmarks).
+
+| Workload                  | Throughput   | TTFT    | TPOT     |
+| ------------------------- | ------------ | ------- | -------- |
+| single stream (1 request) | ~4.8 tok/s   | ~0.8 s  | ~190 ms  |
+| 8 concurrent requests     | ~8.0 tok/s   | —       | —        |
+
+Continuous batching lifts aggregate throughput roughly 1.7x over a single stream by sharing each
+forward pass's weight reads and matmuls across the batch. These are reference-path figures;
+absolute speed is the job of the CUDA path. A full TTFT/TPOT/throughput comparison against
+`nano-vllm` and `vllm` on identical hardware, model, and precision lands with the GPU kernels.
+See [benchmarks/](benchmarks/) for the harness.
 
 ## Architecture
 
@@ -60,15 +85,37 @@ cmake --build --preset cuda-release
 
 ## Run the server
 
-Pending the serving layer (Phase 3). The intended entry point starts an OpenAI-compatible server:
+Weights are not committed, so fetch them first, then start the OpenAI-compatible server:
 
 ```
-python -m engine.serving --model <hf-model-id> --port 8000
+pip install -e ".[serve,dev]"          # serve: fastapi/uvicorn/jinja2; dev: huggingface_hub
+python scripts/fetch_model.py          # downloads Qwen2.5-0.5B-Instruct into weights/
+ENGINE_MODEL_DIR=weights/Qwen2.5-0.5B-Instruct \
+  uvicorn --factory engine.server:create_app --port 8000
 ```
+
+Call it like any OpenAI endpoint:
+
+```
+curl http://localhost:8000/v1/completions \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "Paged attention is", "max_tokens": 64}'
+```
+
+`/v1/chat/completions` (rendered with the model's own chat template) and `"stream": true`
+Server-Sent Events are supported, as is `/v1/models`.
 
 ## Reproduce the benchmarks
 
-Pending the benchmark harness (Phase 3). Each run emits a reproducibility manifest (hardware, driver, toolkit, model revision, precision, concurrency, sampling) alongside the metrics.
+```
+pip install -e ".[dev]"
+python scripts/fetch_model.py
+python benchmarks/harness/bench_engine.py \
+  --model-dir weights/Qwen2.5-0.5B-Instruct --num-requests 8 --max-tokens 32
+```
+
+Pass `--json` for machine-readable output. The harness reports TTFT, TPOT, throughput, and
+requests per second over a batch submitted up front.
 
 ## Scope and limitations
 
