@@ -25,7 +25,8 @@ endforeach()
 add_executable(engine_tests
     test_version.cpp
     test_tensor.cpp
-    test_safetensors.cpp)
+    test_safetensors.cpp
+    test_nn.cpp)
 target_link_libraries(engine_tests PRIVATE engine_core GTest::gtest_main)
 target_compile_definitions(engine_tests PRIVATE ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
