@@ -10,6 +10,8 @@ DEFAULT_PATTERNS = [
     "config.json",
     "generation_config.json",
     "model.safetensors",
+    "model-*-of-*.safetensors",
+    "model.safetensors.index.json",
     "tokenizer.json",
     "tokenizer_config.json",
     "vocab.json",
@@ -31,6 +33,17 @@ def main() -> None:
         local_dir=str(local_dir),
         allow_patterns=DEFAULT_PATTERNS,
     )
+
+    if not any(local_dir.glob("*.safetensors")):
+        raise SystemExit(
+            f"error: no *.safetensors weight files were downloaded for "
+            f"{args.model_id} into {local_dir}.\n"
+            "DEFAULT_PATTERNS covers single-file and standard sharded safetensors "
+            "checkpoints; this repo likely stores its weights under different "
+            "filenames (e.g. pytorch_model*.bin or a non-standard layout). "
+            "Inspect the repo's file list and extend DEFAULT_PATTERNS accordingly."
+        )
+
     print(f"downloaded {args.model_id} -> {path}")
 
 
