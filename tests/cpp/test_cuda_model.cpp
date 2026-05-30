@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+#include "engine/block_manager.hpp"
+#include "engine/cuda/block_manager.hpp"
 #include "engine/cuda/kv_cache.hpp"
 #include "engine/cuda/model.hpp"
 #include "engine/model.hpp"
@@ -171,5 +173,46 @@ TEST(CudaModel, BatchedMixedPrefillDecodeMatchesSequential) {
     for (int64_t j = 0; j < vocab; ++j) {
         EXPECT_NEAR(logits.data()[j], ref_a.data()[last_a + j], 1e-3f) << "a logit " << j;
         EXPECT_NEAR(logits.data()[vocab + j], ref_b.data()[last_b + j], 1e-3f) << "b logit " << j;
+    }
+}
+
+// The paged batched forward (shared device pool, scatter + gather) must match the per-cache
+// batched forward on the same sequences: true GPU PagedAttention is just paged storage under the
+// same attention.
+TEST(CudaModel, PagedBatchedForwardMatchesNonPaged) {
+    const engine::ModelConfig config = tiny::tiny_config();
+    const engine::SafeTensors weights = engine::SafeTensors::from_tensors(tiny::tiny_weights());
+    const engine::cuda::CudaModel gpu = engine::cuda::CudaModel::from_safetensors(config, weights);
+    const int64_t kv_dim = config.num_key_value_heads * config.head_dim;
+    const std::vector<std::vector<int64_t>> seqs = {{1, 2, 3}, {4, 5}, {6, 7, 8, 9}};
+
+    std::vector<engine::cuda::GpuKVCache> caches;
+    caches.reserve(seqs.size());
+    for (const std::vector<int64_t>& s : seqs) {
+        caches.emplace_back(config.num_hidden_layers, kv_dim, static_cast<int64_t>(s.size()));
+    }
+    std::vector<engine::cuda::GpuBatchItem> items;
+    items.reserve(seqs.size());
+    for (std::size_t i = 0; i < seqs.size(); ++i) {
+        items.push_back({&caches[i], seqs[i]});
+    }
+    const engine::Tensor reference = gpu.forward_batch(items);
+
+    engine::cuda::GpuBlockManager mgr(config.num_hidden_layers,
+                                      kv_dim,
+                                      /*block_size=*/2,
+                                      /*num_blocks=*/64);
+    std::vector<engine::SequenceBlocks> blocks(seqs.size());
+    std::vector<engine::cuda::PagedBatchItem> paged_items;
+    paged_items.reserve(seqs.size());
+    for (std::size_t i = 0; i < seqs.size(); ++i) {
+        paged_items.push_back({&blocks[i], seqs[i]});
+    }
+    const engine::Tensor paged = gpu.forward_batch_paged(mgr, paged_items);
+
+    ASSERT_EQ(paged.dim(0), reference.dim(0));
+    ASSERT_EQ(paged.dim(1), reference.dim(1));
+    for (int64_t i = 0; i < reference.numel(); ++i) {
+        EXPECT_NEAR(paged.data()[i], reference.data()[i], 1e-4f) << "index " << i;
     }
 }

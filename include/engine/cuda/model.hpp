@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "engine/cuda/block_manager.hpp"
 #include "engine/cuda/kv_cache.hpp"
 #include "engine/model_config.hpp"
 #include "engine/safetensors.hpp"
@@ -17,6 +18,13 @@ namespace engine::cuda {
 // Mirrors the CPU BatchItem.
 struct GpuBatchItem {
     GpuKVCache* cache;
+    std::vector<int64_t> tokens;
+};
+
+// One sequence's work for a batched paged step: its block table inside a shared GpuBlockManager
+// pool (extended in place, non-owning) and the new tokens. The K/V live in the manager, not here.
+struct PagedBatchItem {
+    SequenceBlocks* blocks;
     std::vector<int64_t> tokens;
 };
 
@@ -53,6 +61,11 @@ public:
     // cache. Extends each item's cache and returns last-token logits per item [num_items,
     // vocab_size].
     [[nodiscard]] Tensor forward_batch(const std::vector<GpuBatchItem>& items) const;
+
+    // Same as forward_batch but over a shared paged pool (GpuBlockManager): true GPU
+    // PagedAttention. Each item's K/V is scattered into its blocks, then gathered for attention.
+    [[nodiscard]] Tensor forward_batch_paged(GpuBlockManager& manager,
+                                             const std::vector<PagedBatchItem>& items) const;
 
     [[nodiscard]] const ModelConfig& config() const noexcept;
 
