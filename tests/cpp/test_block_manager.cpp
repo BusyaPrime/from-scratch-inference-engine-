@@ -105,3 +105,32 @@ TEST(BlockManager, ClearPrefixCacheReleasesBlocks) {
     m.clear_prefix_cache();
     EXPECT_EQ(m.free_blocks(), 8); // now fully returned
 }
+
+// When the pool is full of cached prefixes, a new allocation evicts the least-recently-used one.
+TEST(BlockManager, PrefixCacheEvictsLruWhenPoolExhausted) {
+    engine::BlockManager m(/*num_layers=*/1, /*kv_dim=*/1, /*block_size=*/2, /*num_blocks=*/4);
+    const std::vector<float> k = {1.0f, 1.0f};
+    const auto cache_one = [&](const std::vector<int64_t>& tokens) {
+        engine::SequenceBlocks s;
+        m.reserve(s, 2);
+        m.write(s, 0, 0, k.data(), k.data(), 2);
+        m.commit(s, 2);
+        m.register_prefix(s, tokens);
+        m.free(s); // owner releases; the cache keeps the block
+    };
+    cache_one({10, 11}); // least recently used
+    cache_one({20, 21});
+    cache_one({30, 31});
+    cache_one({40, 41});
+    EXPECT_EQ(m.free_blocks(), 0); // pool fully occupied by cached prefixes
+
+    engine::SequenceBlocks e;
+    m.reserve(e, 2); // would throw without eviction; instead the LRU prefix is dropped
+    EXPECT_EQ(e.block_table.size(), 1u);
+
+    engine::SequenceBlocks probe_old;
+    EXPECT_EQ(m.acquire_shared_prefix(probe_old, {10, 11}), 0); // evicted, no longer matches
+    engine::SequenceBlocks probe_new;
+    EXPECT_EQ(m.acquire_shared_prefix(probe_new, {40, 41}), 2); // still cached
+    m.free(probe_new);
+}

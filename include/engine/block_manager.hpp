@@ -90,13 +90,20 @@ private:
     gather_one(const std::vector<float>& store, const SequenceBlocks& seq, int64_t rows) const;
 
     // A cached prefix block: the block's own tokens and its parent block's hash (for collision-safe
-    // matching), and the physical block holding the K/V.
+    // matching), the physical block holding the K/V, and an LRU tick for eviction.
     struct PrefixEntry {
         uint64_t parent;
         std::vector<int64_t> tokens;
         int64_t block;
+        int64_t last_used;
     };
     [[nodiscard]] static uint64_t hash_block(uint64_t parent, const int64_t* tokens, int64_t n);
+
+    // Allocate a block; if the pool is exhausted, first evict the LRU unshared cached prefix.
+    // Throws only if nothing can be freed.
+    int64_t allocate_block();
+    // Free the LRU cached prefix block whose only holder is the cache (reference count 1).
+    void evict_lru();
 
     int64_t num_layers_;
     int64_t kv_dim_;
@@ -106,6 +113,7 @@ private:
     std::vector<std::vector<float>> values_; // per layer: num_blocks * block_size * kv_dim
     std::unordered_map<uint64_t, std::vector<PrefixEntry>> prefix_; // block hash -> entries
     int64_t prefix_hits_ = 0;
+    int64_t tick_ = 0; // monotonic LRU clock
 };
 
 } // namespace engine
