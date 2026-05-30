@@ -3,11 +3,13 @@
 
 #include "engine/dtype.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <utility>
 
 namespace engine {
 namespace {
@@ -34,55 +36,93 @@ SafeTensors SafeTensors::parse(const uint8_t* data, std::size_t size) {
     for (int i = 0; i < 8; ++i) {
         header_len |= static_cast<uint64_t>(data[i]) << (8 * i);
     }
-    if (8 + header_len > size) {
+    // size >= 8 above, so size - 8 cannot underflow; this avoids the 8 + header_len overflow.
+    if (header_len > static_cast<uint64_t>(size) - 8) {
         throw std::runtime_error("safetensors: header length exceeds the buffer");
     }
 
-    const auto header = nlohmann::json::parse(
-        std::string(reinterpret_cast<const char*>(data + 8), static_cast<std::size_t>(header_len)));
+    nlohmann::json header;
+    try {
+        header = nlohmann::json::parse(reinterpret_cast<const char*>(data + 8),
+                                       reinterpret_cast<const char*>(data + 8) + header_len);
+    } catch (const nlohmann::json::exception& e) {
+        throw std::runtime_error(std::string("safetensors: invalid header JSON: ") + e.what());
+    }
+
     const uint8_t* base = data + 8 + header_len;
     const uint64_t region = static_cast<uint64_t>(size) - 8 - header_len;
 
+    std::vector<std::pair<uint64_t, uint64_t>> spans; // for the non-overlap check
     SafeTensors st;
-    for (const auto& item : header.items()) {
-        const std::string& name = item.key();
-        if (name == "__metadata__") {
-            continue;
-        }
-        const auto& meta = item.value();
-        const std::string dtype = meta.at("dtype").get<std::string>();
-        const auto shape = meta.at("shape").get<std::vector<int64_t>>();
-        const auto& offsets = meta.at("data_offsets");
-        const uint64_t begin = offsets.at(0).get<uint64_t>();
-        const uint64_t end = offsets.at(1).get<uint64_t>();
-        if (end < begin || end > region) {
-            throw std::runtime_error("safetensors: data_offsets out of range for " + name);
-        }
-
-        const int64_t numel = numel_of(shape);
-        const uint64_t nbytes = end - begin;
-        const uint8_t* p = base + begin;
-        std::vector<float> out(static_cast<std::size_t>(numel));
-
-        if (dtype == "F32") {
-            if (nbytes != static_cast<uint64_t>(numel) * 4) {
-                throw std::runtime_error("safetensors: F32 byte count mismatch for " + name);
+    try {
+        for (const auto& item : header.items()) {
+            const std::string& name = item.key();
+            if (name == "__metadata__") {
+                continue;
             }
-            std::memcpy(out.data(), p, static_cast<std::size_t>(nbytes));
-        } else if (dtype == "F16" || dtype == "BF16") {
-            if (nbytes != static_cast<uint64_t>(numel) * 2) {
-                throw std::runtime_error("safetensors: 16-bit byte count mismatch for " + name);
-            }
-            const bool half = (dtype == "F16");
-            for (int64_t i = 0; i < numel; ++i) {
-                const uint16_t bits = little_endian_u16(p + 2 * i);
-                out[static_cast<std::size_t>(i)] = half ? f16_to_f32(bits) : bf16_to_f32(bits);
-            }
-        } else {
-            throw std::runtime_error("safetensors: unsupported dtype '" + dtype + "' for " + name);
-        }
+            const auto& meta = item.value();
+            const std::string dtype = meta.at("dtype").get<std::string>();
+            const auto shape = meta.at("shape").get<std::vector<int64_t>>();
+            const auto& offsets = meta.at("data_offsets");
+            const uint64_t begin = offsets.at(0).get<uint64_t>();
+            const uint64_t end = offsets.at(1).get<uint64_t>();
 
-        st.tensors_.emplace(name, Tensor(shape, std::move(out)));
+            if (end < begin || end > region) {
+                throw std::runtime_error("safetensors: data_offsets out of range for " + name);
+            }
+            for (const int64_t d : shape) {
+                if (d < 0) {
+                    throw std::runtime_error("safetensors: negative dimension for " + name);
+                }
+            }
+
+            uint64_t elem_size = 0;
+            if (dtype == "F32") {
+                elem_size = 4;
+            } else if (dtype == "F16" || dtype == "BF16") {
+                elem_size = 2;
+            } else {
+                throw std::runtime_error("safetensors: unsupported dtype '" + dtype + "' for " +
+                                         name);
+            }
+
+            const int64_t numel = numel_of(shape);
+            const uint64_t nbytes = end - begin;
+            // Validate via division (never multiplies numel) so an overflowed/negative numel
+            // cannot spuriously match, and validate before allocating the output buffer.
+            if (nbytes % elem_size != 0 || nbytes / elem_size != static_cast<uint64_t>(numel)) {
+                throw std::runtime_error("safetensors: byte count does not match shape for " +
+                                         name);
+            }
+
+            const uint8_t* p = base + begin;
+            std::vector<float> out(static_cast<std::size_t>(numel));
+            if (dtype == "F32") {
+                std::memcpy(out.data(), p, static_cast<std::size_t>(nbytes));
+            } else {
+                const bool half = (dtype == "F16");
+                for (int64_t i = 0; i < numel; ++i) {
+                    const uint16_t bits = little_endian_u16(p + 2 * i);
+                    out[static_cast<std::size_t>(i)] = half ? f16_to_f32(bits) : bf16_to_f32(bits);
+                }
+            }
+
+            spans.emplace_back(begin, end);
+            const bool inserted = st.tensors_.emplace(name, Tensor(shape, std::move(out))).second;
+            if (!inserted) {
+                throw std::runtime_error("safetensors: duplicate tensor name '" + name + "'");
+            }
+        }
+    } catch (const nlohmann::json::exception& e) {
+        throw std::runtime_error(std::string("safetensors: malformed header entry: ") + e.what());
+    }
+
+    // The format requires sorted, non-overlapping data regions.
+    std::sort(spans.begin(), spans.end());
+    for (std::size_t i = 1; i < spans.size(); ++i) {
+        if (spans[i].first < spans[i - 1].second) {
+            throw std::runtime_error("safetensors: overlapping tensor data regions");
+        }
     }
     return st;
 }

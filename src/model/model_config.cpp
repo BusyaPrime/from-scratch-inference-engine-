@@ -2,6 +2,7 @@
 #include "engine/model_config.hpp"
 
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 
 namespace engine {
 
@@ -13,6 +14,9 @@ ModelConfig ModelConfig::from_json(const std::string& text) {
     c.hidden_size = j.at("hidden_size").get<int64_t>();
     c.num_hidden_layers = j.at("num_hidden_layers").get<int64_t>();
     c.num_attention_heads = j.at("num_attention_heads").get<int64_t>();
+    if (c.num_attention_heads <= 0) {
+        throw std::runtime_error("model config: num_attention_heads must be positive");
+    }
     c.num_key_value_heads = j.value("num_key_value_heads", c.num_attention_heads);
     c.head_dim = j.contains("head_dim") ? j.at("head_dim").get<int64_t>()
                                         : c.hidden_size / c.num_attention_heads;

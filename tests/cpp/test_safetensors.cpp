@@ -11,18 +11,8 @@
 
 namespace {
 
-// A minimal in-memory safetensors buffer: F32 [2,2] = {1,2,3,4}, BF16 [2] = {1,2}.
-std::vector<uint8_t> build_safetensors() {
-    const std::string header = R"({"a":{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]},)"
-                               R"("b":{"dtype":"BF16","shape":[2],"data_offsets":[16,20]}})";
-
-    std::vector<uint8_t> payload;
-    const float f32[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    const auto* fp = reinterpret_cast<const uint8_t*>(f32);
-    payload.insert(payload.end(), fp, fp + 16);
-    // bf16 little-endian: 1.0 -> 0x3F80 -> {0x80,0x3F}; 2.0 -> 0x4000 -> {0x00,0x40}
-    payload.insert(payload.end(), {0x80, 0x3F, 0x00, 0x40});
-
+// Prepend the 8-byte little-endian header length to a header + payload.
+std::vector<uint8_t> st_buf(const std::string& header, const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> buf;
     const uint64_t len = header.size();
     for (int i = 0; i < 8; ++i) {
@@ -31,6 +21,19 @@ std::vector<uint8_t> build_safetensors() {
     buf.insert(buf.end(), header.begin(), header.end());
     buf.insert(buf.end(), payload.begin(), payload.end());
     return buf;
+}
+
+// A minimal valid buffer: F32 [2,2] = {1,2,3,4}, BF16 [2] = {1,2}.
+std::vector<uint8_t> build_safetensors() {
+    const std::string header = R"({"a":{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]},)"
+                               R"("b":{"dtype":"BF16","shape":[2],"data_offsets":[16,20]}})";
+    std::vector<uint8_t> payload;
+    const float f32[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    const auto* fp = reinterpret_cast<const uint8_t*>(f32);
+    payload.insert(payload.end(), fp, fp + 16);
+    // bf16 little-endian: 1.0 -> 0x3F80 -> {0x80,0x3F}; 2.0 -> 0x4000 -> {0x00,0x40}
+    payload.insert(payload.end(), {0x80, 0x3F, 0x00, 0x40});
+    return st_buf(header, payload);
 }
 
 } // namespace
@@ -57,6 +60,48 @@ TEST(SafeTensors, MissingTensorThrows) {
     EXPECT_THROW((void)st.get("absent"), std::runtime_error);
 }
 
+TEST(SafeTensorsHardening, RejectsOverflowingHeaderLength) {
+    std::vector<uint8_t> buf(16, 0xFF); // header_len = 2^64-1
+    EXPECT_THROW((void)engine::SafeTensors::parse(buf.data(), buf.size()), std::runtime_error);
+}
+
+TEST(SafeTensorsHardening, RejectsTruncatedHeader) {
+    std::vector<uint8_t> buf(8, 0);
+    buf[0] = 0xFF; // header_len = 255, but no header bytes follow
+    EXPECT_THROW((void)engine::SafeTensors::parse(buf.data(), buf.size()), std::runtime_error);
+}
+
+TEST(SafeTensorsHardening, RejectsNegativeDimension) {
+    const auto buf = st_buf(R"({"a":{"dtype":"F32","shape":[-1,4],"data_offsets":[0,16]}})",
+                            std::vector<uint8_t>(16, 0));
+    EXPECT_THROW((void)engine::SafeTensors::parse(buf.data(), buf.size()), std::runtime_error);
+}
+
+TEST(SafeTensorsHardening, RejectsByteCountMismatch) {
+    const auto buf = st_buf(R"({"a":{"dtype":"F32","shape":[2,2],"data_offsets":[0,8]}})",
+                            std::vector<uint8_t>(8, 0));
+    EXPECT_THROW((void)engine::SafeTensors::parse(buf.data(), buf.size()), std::runtime_error);
+}
+
+TEST(SafeTensorsHardening, RejectsOverlappingRegions) {
+    const auto buf = st_buf(R"({"a":{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]},)"
+                            R"("b":{"dtype":"F32","shape":[2,2],"data_offsets":[8,24]}})",
+                            std::vector<uint8_t>(24, 0));
+    EXPECT_THROW((void)engine::SafeTensors::parse(buf.data(), buf.size()), std::runtime_error);
+}
+
+TEST(SafeTensorsHardening, NormalizesMalformedHeaderToRuntimeError) {
+    // Missing data_offsets would raise nlohmann::json::out_of_range; must surface as runtime_error.
+    const auto buf = st_buf(R"({"a":{"dtype":"F32","shape":[2,2]}})", std::vector<uint8_t>(16, 0));
+    EXPECT_THROW((void)engine::SafeTensors::parse(buf.data(), buf.size()), std::runtime_error);
+}
+
+TEST(SafeTensorsHardening, RejectsUnsupportedDtype) {
+    const auto buf = st_buf(R"({"a":{"dtype":"I64","shape":[2],"data_offsets":[0,16]}})",
+                            std::vector<uint8_t>(16, 0));
+    EXPECT_THROW((void)engine::SafeTensors::parse(buf.data(), buf.size()), std::runtime_error);
+}
+
 TEST(ModelConfig, ParsesQwen2FieldsAndDerivesHeadDim) {
     const std::string cfg = R"({
         "model_type": "qwen2", "hidden_size": 896, "num_hidden_layers": 24,
@@ -71,6 +116,14 @@ TEST(ModelConfig, ParsesQwen2FieldsAndDerivesHeadDim) {
     EXPECT_EQ(c.head_dim, 64); // derived from 896 / 14
     EXPECT_TRUE(c.tie_word_embeddings);
     EXPECT_TRUE(c.attention_qkv_bias); // qwen2 -> bias on q/k/v
+}
+
+TEST(ModelConfig, RejectsZeroAttentionHeads) {
+    const std::string cfg = R"({
+        "model_type": "qwen2", "hidden_size": 896, "num_hidden_layers": 24,
+        "num_attention_heads": 0, "intermediate_size": 4864, "vocab_size": 151936
+    })";
+    EXPECT_THROW((void)engine::ModelConfig::from_json(cfg), std::runtime_error);
 }
 
 TEST(SafeTensorsReal, LoadsQwenWeightsIfPresent) {
