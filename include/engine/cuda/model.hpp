@@ -12,6 +12,14 @@
 
 namespace engine::cuda {
 
+// One sequence's work for a batched GPU step: its device KV cache (extended in place, non-owning)
+// and the new tokens to process. A prefill item carries the whole prompt, a decode item one token.
+// Mirrors the CPU BatchItem.
+struct GpuBatchItem {
+    GpuKVCache* cache;
+    std::vector<int64_t> tokens;
+};
+
 // GPU-resident forward of the Qwen2 model. Weights are uploaded to the device once; forward keeps
 // activations on the device across layers and returns host logits. It mirrors the CPU
 // Model::forward (full causal attention, no cache) so the two can be compared directly. The
@@ -39,6 +47,12 @@ public:
     // eos_id (-1 disables). The next token is the argmax of the last position's logits.
     [[nodiscard]] std::vector<int64_t>
     generate(const std::vector<int64_t>& prompt, int64_t max_tokens, int64_t eos_id = -1) const;
+
+    // Continuous-batching forward: process many sequences (mixed prefill and decode) in one set of
+    // matmuls over their concatenated tokens, with per-sequence attention over each item's device
+    // cache. Extends each item's cache and returns last-token logits per item [num_items,
+    // vocab_size].
+    [[nodiscard]] Tensor forward_batch(const std::vector<GpuBatchItem>& items) const;
 
     [[nodiscard]] const ModelConfig& config() const noexcept;
 

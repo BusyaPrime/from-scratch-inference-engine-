@@ -105,3 +105,71 @@ TEST(CudaModel, GreedyGenerationMatchesFullForward) {
     const std::vector<int64_t> got = gpu.generate(prompt, n, -1);
     EXPECT_EQ(got, reference);
 }
+
+// Batched prefill of several sequences must give each the same last-token logits as forwarding it
+// alone: per-item attention over per-item caches keeps the sequences independent.
+TEST(CudaModel, BatchedPrefillMatchesIndividualForward) {
+    const engine::ModelConfig config = tiny::tiny_config();
+    const engine::SafeTensors weights = engine::SafeTensors::from_tensors(tiny::tiny_weights());
+    const engine::cuda::CudaModel gpu = engine::cuda::CudaModel::from_safetensors(config, weights);
+    const int64_t vocab = config.vocab_size;
+    const int64_t kv_dim = config.num_key_value_heads * config.head_dim;
+
+    const std::vector<std::vector<int64_t>> seqs = {{1, 2, 3}, {4, 5}, {6, 7, 8, 9}};
+    std::vector<engine::Tensor> refs;
+    refs.reserve(seqs.size());
+    for (const std::vector<int64_t>& s : seqs) {
+        refs.push_back(gpu.forward(s));
+    }
+
+    std::vector<engine::cuda::GpuKVCache> caches;
+    caches.reserve(seqs.size());
+    for (const std::vector<int64_t>& s : seqs) {
+        caches.emplace_back(config.num_hidden_layers, kv_dim, static_cast<int64_t>(s.size()));
+    }
+    std::vector<engine::cuda::GpuBatchItem> items;
+    items.reserve(seqs.size());
+    for (std::size_t i = 0; i < seqs.size(); ++i) {
+        items.push_back({&caches[i], seqs[i]});
+    }
+
+    const engine::Tensor logits = gpu.forward_batch(items);
+    ASSERT_EQ(logits.dim(0), static_cast<int64_t>(seqs.size()));
+    for (std::size_t i = 0; i < seqs.size(); ++i) {
+        const int64_t last = (static_cast<int64_t>(seqs[i].size()) - 1) * vocab;
+        for (int64_t j = 0; j < vocab; ++j) {
+            EXPECT_NEAR(
+                logits.data()[static_cast<int64_t>(i) * vocab + j], refs[i].data()[last + j], 1e-3f)
+                << "seq " << i << " logit " << j;
+        }
+    }
+}
+
+// A batched prefill step then a batched decode step over per-item caches must match the full
+// forward of each extended sequence.
+TEST(CudaModel, BatchedMixedPrefillDecodeMatchesSequential) {
+    const engine::ModelConfig config = tiny::tiny_config();
+    const engine::SafeTensors weights = engine::SafeTensors::from_tensors(tiny::tiny_weights());
+    const engine::cuda::CudaModel gpu = engine::cuda::CudaModel::from_safetensors(config, weights);
+    const int64_t vocab = config.vocab_size;
+    const int64_t kv_dim = config.num_key_value_heads * config.head_dim;
+
+    const engine::Tensor ref_a = gpu.forward({1, 2, 3, 7});
+    const engine::Tensor ref_b = gpu.forward({4, 5, 8});
+
+    engine::cuda::GpuKVCache cache_a(config.num_hidden_layers, kv_dim, 8);
+    engine::cuda::GpuKVCache cache_b(config.num_hidden_layers, kv_dim, 8);
+
+    std::vector<engine::cuda::GpuBatchItem> prefill = {{&cache_a, {1, 2, 3}}, {&cache_b, {4, 5}}};
+    static_cast<void>(gpu.forward_batch(prefill));
+
+    std::vector<engine::cuda::GpuBatchItem> decode = {{&cache_a, {7}}, {&cache_b, {8}}};
+    const engine::Tensor logits = gpu.forward_batch(decode);
+
+    const int64_t last_a = (4 - 1) * vocab;
+    const int64_t last_b = (3 - 1) * vocab;
+    for (int64_t j = 0; j < vocab; ++j) {
+        EXPECT_NEAR(logits.data()[j], ref_a.data()[last_a + j], 1e-3f) << "a logit " << j;
+        EXPECT_NEAR(logits.data()[vocab + j], ref_b.data()[last_b + j], 1e-3f) << "b logit " << j;
+    }
+}
