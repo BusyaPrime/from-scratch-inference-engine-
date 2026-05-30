@@ -148,12 +148,11 @@ TEST(Engine, PrefixCacheReusesSharedPromptAndMatches) {
     const std::vector<int64_t> pb = {1, 2, 3, 4, 9, 8}; // shares the first two blocks
     const int64_t n = 5;
 
-    engine::Engine reference(model, /*block_size=*/2, /*num_blocks=*/256, /*seed=*/3,
-                             /*max_batch=*/256, /*enable_prefix_cache=*/false);
+    engine::Engine reference(model, 2, 256, 3, 256, false); // prefix cache off
     const std::vector<int64_t> ref_a = reference.generate(pa, greedy(), n);
     const std::vector<int64_t> ref_b = reference.generate(pb, greedy(), n);
 
-    engine::Engine eng(model, 2, 256, 3, 256, /*enable_prefix_cache=*/true);
+    engine::Engine eng(model, 2, 256, 3, 256, true); // prefix cache on
     const std::vector<int64_t> got_a = eng.generate(pa, greedy(), n);
     const std::vector<int64_t> got_b = eng.generate(pb, greedy(), n);
 
