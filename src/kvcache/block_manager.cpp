@@ -30,7 +30,44 @@ BlockManager::BlockManager(int64_t num_layers,
 void BlockManager::reserve(SequenceBlocks& seq, int64_t n_new) {
     const int64_t need = blocks_for(seq.length + n_new);
     while (static_cast<int64_t>(seq.block_table.size()) < need) {
-        seq.block_table.push_back(alloc_.allocate());
+        seq.block_table.push_back(allocate_block());
+    }
+}
+
+int64_t BlockManager::allocate_block() {
+    if (alloc_.num_free() == 0) {
+        evict_lru(); // reclaim a cached prefix block rather than fail outright
+    }
+    return alloc_.allocate();
+}
+
+void BlockManager::evict_lru() {
+    uint64_t victim_hash = 0;
+    std::size_t victim_index = 0;
+    int64_t oldest = 0;
+    bool found = false;
+    for (auto& bucket : prefix_) {
+        std::vector<PrefixEntry>& entries = bucket.second;
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            // Only blocks held solely by the cache (ref count 1) are safe to drop; a higher count
+            // means a live sequence is still attending over them.
+            if (alloc_.ref_count(entries[i].block) == 1 &&
+                (!found || entries[i].last_used < oldest)) {
+                oldest = entries[i].last_used;
+                victim_hash = bucket.first;
+                victim_index = i;
+                found = true;
+            }
+        }
+    }
+    if (!found) {
+        return;
+    }
+    std::vector<PrefixEntry>& bucket = prefix_[victim_hash];
+    alloc_.free(bucket[victim_index].block); // last reference -> block returns to the pool
+    bucket.erase(bucket.begin() + static_cast<std::ptrdiff_t>(victim_index));
+    if (bucket.empty()) {
+        prefix_.erase(victim_hash);
     }
 }
 
@@ -121,11 +158,12 @@ int64_t BlockManager::acquire_shared_prefix(SequenceBlocks& seq,
         const auto it = prefix_.find(h);
         int64_t block = -1;
         if (it != prefix_.end()) {
-            for (const PrefixEntry& entry : it->second) {
+            for (PrefixEntry& entry : it->second) {
                 if (entry.parent == parent &&
                     static_cast<int64_t>(entry.tokens.size()) == block_size_ &&
                     std::equal(entry.tokens.begin(), entry.tokens.end(), span)) {
                     block = entry.block;
+                    entry.last_used = ++tick_; // refresh LRU on reuse
                     break;
                 }
             }
@@ -166,7 +204,8 @@ void BlockManager::register_prefix(const SequenceBlocks& seq, const std::vector<
         if (!exists) {
             const int64_t block = seq.block_table[static_cast<std::size_t>(b)];
             alloc_.incref(block); // keep the cached block live independent of the owner
-            entries.push_back({parent, std::vector<int64_t>(span, span + block_size_), block});
+            entries.push_back(
+                {parent, std::vector<int64_t>(span, span + block_size_), block, ++tick_});
         }
         parent = h;
     }
