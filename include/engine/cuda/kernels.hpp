@@ -70,4 +70,9 @@ void paged_gather(const float* pool,
                   int64_t block_size,
                   int64_t kv_dim);
 
+// Greedy next-token selection: out[r] = argmax_j logits[r, j] over cols columns; ties resolve to
+// the smallest index, matching the CPU sampler. Reduces on the device so callers copy back rows
+// token ids instead of the full [rows, cols] logits.
+void argmax(const float* logits, int64_t* out, int64_t rows, int64_t cols);
+
 } // namespace engine::cuda::kernels

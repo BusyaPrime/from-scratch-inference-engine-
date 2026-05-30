@@ -72,4 +72,9 @@ void embedding(const float* weight,
 // x[i] += y[i] over n elements (residual add).
 void add_inplace(float* x, const float* y, int64_t n);
 
+// Greedy argmax over each row: out[r] = argmax_j logits[r, j] for r in [0, rows), j in [0, cols).
+// Ties resolve to the smallest index, matching the CPU sampler. logits is [rows, cols] on the
+// host; out is [rows] on the host.
+void argmax(const float* logits, int64_t* out, int64_t rows, int64_t cols);
+
 } // namespace engine::cuda

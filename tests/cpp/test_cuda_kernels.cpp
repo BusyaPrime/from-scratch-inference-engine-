@@ -196,3 +196,40 @@ TEST(CudaKernels, AddInplaceMatchesCpu) {
             << "index " << i;
     }
 }
+
+// Device argmax over each row must pick the same index as the CPU greedy argmax (first max wins).
+TEST(CudaKernels, ArgmaxMatchesCpu) {
+    std::mt19937 rng(41);
+    const int64_t rows = 3;
+    const int64_t cols = 151936; // Qwen2.5-0.5B vocab size
+    const engine::Tensor logits = random_tensor({rows, cols}, rng);
+
+    std::vector<int64_t> got(static_cast<std::size_t>(rows));
+    engine::cuda::argmax(logits.data(), got.data(), rows, cols);
+
+    for (int64_t r = 0; r < rows; ++r) {
+        const float* row = logits.data() + r * cols;
+        int64_t best = 0;
+        for (int64_t j = 1; j < cols; ++j) {
+            if (row[j] > row[best]) {
+                best = j;
+            }
+        }
+        EXPECT_EQ(got[static_cast<std::size_t>(r)], best) << "row " << r;
+    }
+}
+
+// Equal maxima must resolve to the smallest index, exactly like the CPU sampler.
+TEST(CudaKernels, ArgmaxBreaksTiesToSmallestIndex) {
+    const int64_t cols = 8;
+    engine::Tensor logits({1, cols});
+    for (int64_t j = 0; j < cols; ++j) {
+        logits.data()[j] = 0.5f;
+    }
+    logits.data()[2] = 1.0f;
+    logits.data()[5] = 1.0f; // tie for the maximum at indices 2 and 5
+
+    std::vector<int64_t> got(1);
+    engine::cuda::argmax(logits.data(), got.data(), 1, cols);
+    EXPECT_EQ(got[0], 2);
+}

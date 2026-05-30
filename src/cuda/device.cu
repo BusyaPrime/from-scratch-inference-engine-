@@ -2,6 +2,7 @@
 #include "engine/cuda/device.hpp"
 #include "engine/cuda/kernels.hpp"
 
+#include <cfloat>
 #include <cmath>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -224,6 +225,46 @@ __global__ void paged_gather_kernel(const float* pool,
     out[idx] = pool[(pb * block_size + slot) * kv_dim + e];
 }
 
+// One block per row. Each thread scans a strided slice of the row for its local max (smallest
+// index wins a tie), then the block tree-reduces to the row's argmax. The tie rule matches the CPU
+// sampler's first-max-wins. blockDim must be a power of 2; shared memory holds blockDim index/value
+// pairs (indices first to keep the int64 array 8-byte aligned).
+__global__ void argmax_kernel(const float* logits, int64_t* out, int64_t cols) {
+    extern __shared__ unsigned char smem[];
+    int64_t* sidx = reinterpret_cast<int64_t*>(smem);
+    float* sval = reinterpret_cast<float*>(sidx + blockDim.x);
+    const int64_t row = blockIdx.x;
+    const float* r = logits + row * cols;
+
+    float best_val = -FLT_MAX;
+    int64_t best_idx = 0;
+    for (int64_t j = threadIdx.x; j < cols; j += blockDim.x) {
+        if (r[j] > best_val) {
+            best_val = r[j];
+            best_idx = j;
+        }
+    }
+    sidx[threadIdx.x] = best_idx;
+    sval[threadIdx.x] = best_val;
+    __syncthreads();
+
+    for (unsigned stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            const float other_val = sval[threadIdx.x + stride];
+            const int64_t other_idx = sidx[threadIdx.x + stride];
+            if (other_val > sval[threadIdx.x] ||
+                (other_val == sval[threadIdx.x] && other_idx < sidx[threadIdx.x])) {
+                sval[threadIdx.x] = other_val;
+                sidx[threadIdx.x] = other_idx;
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        out[row] = sidx[0];
+    }
+}
+
 } // namespace
 
 namespace kernels {
@@ -364,6 +405,16 @@ void paged_gather(const float* pool,
     paged_gather_kernel<<<grid_for(rows * kv_dim, kThreads), kThreads>>>(
         pool, block_table, out, rows, block_size, kv_dim);
     check(cudaGetLastError(), "launch paged_gather");
+}
+
+void argmax(const float* logits, int64_t* out, int64_t rows, int64_t cols) {
+    if (rows <= 0 || cols <= 0) {
+        return;
+    }
+    const auto shared_bytes =
+        static_cast<std::size_t>(kThreads) * (sizeof(int64_t) + sizeof(float));
+    argmax_kernel<<<static_cast<int>(rows), kThreads, shared_bytes>>>(logits, out, cols);
+    check(cudaGetLastError(), "launch argmax");
 }
 
 } // namespace kernels
@@ -583,6 +634,23 @@ void attention(const float* q,
     cudaFree(dq);
     cudaFree(dk);
     cudaFree(dv);
+    cudaFree(dout);
+}
+
+void argmax(const float* logits, int64_t* out, int64_t rows, int64_t cols) {
+    if (rows <= 0 || cols <= 0) {
+        return;
+    }
+    const auto in_bytes = sizeof(float) * static_cast<std::size_t>(rows * cols);
+    const auto out_bytes = sizeof(int64_t) * static_cast<std::size_t>(rows);
+    float* dlogits = nullptr;
+    int64_t* dout = nullptr;
+    check(cudaMalloc(&dlogits, in_bytes), "malloc logits");
+    check(cudaMalloc(&dout, out_bytes), "malloc out");
+    check(cudaMemcpy(dlogits, logits, in_bytes, cudaMemcpyHostToDevice), "copy logits");
+    kernels::argmax(dlogits, dout, rows, cols);
+    check(cudaMemcpy(out, dout, out_bytes, cudaMemcpyDeviceToHost), "copy out");
+    cudaFree(dlogits);
     cudaFree(dout);
 }
 
