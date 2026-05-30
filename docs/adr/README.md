@@ -7,5 +7,6 @@ Each ADR captures one significant decision: its context, the choice, and the con
 | [0001](0001-cpp-python-split.md) | C++/CUDA core with a Python frontend | Accepted |
 | [0002](0002-test-frameworks.md) | Test and micro-benchmark frameworks | Accepted |
 | [0003](0003-dependency-boundary.md) | Dependency boundary and "from scratch" scope | Accepted |
+| [0004](0004-cuda-kernel-architecture.md) | CUDA kernel architecture and parity strategy | Accepted |
 
-Planned: device backend abstraction (CPU reference vs CUDA), KV-cache block size, quantization scheme, speculative-decoding draft choice.
+Planned: KV-cache block size, quantization scheme, speculative-decoding draft choice.
