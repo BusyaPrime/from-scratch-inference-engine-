@@ -145,7 +145,7 @@ TEST(Engine, EosStopsGeneration) {
 TEST(Engine, PrefixCacheReusesSharedPromptAndMatches) {
     const engine::Model model = tiny::tiny_model();
     const std::vector<int64_t> pa = {1, 2, 3, 4, 5, 6};
-    const std::vector<int64_t> pb = {1, 2, 3, 4, 9, 8}; // shares the first two blocks (block_size 2)
+    const std::vector<int64_t> pb = {1, 2, 3, 4, 9, 8}; // shares the first two blocks
     const int64_t n = 5;
 
     engine::Engine reference(model, /*block_size=*/2, /*num_blocks=*/256, /*seed=*/3,
