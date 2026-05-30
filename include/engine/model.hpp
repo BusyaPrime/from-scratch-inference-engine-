@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "engine/kv_cache.hpp"
 #include "engine/model_config.hpp"
 #include "engine/safetensors.hpp"
 #include "engine/tensor.hpp"
@@ -16,8 +17,17 @@ class Model {
 public:
     static Model from_pretrained(const std::string& model_dir);
 
+    // Construct from a config and an in-memory weight set (e.g. a tiny test model).
+    static Model from_safetensors(ModelConfig config, SafeTensors weights) {
+        return Model(std::move(config), std::move(weights));
+    }
+
     // Full-attention forward over one sequence of token ids -> logits [seq_len, vocab_size].
     [[nodiscard]] Tensor forward(const std::vector<int64_t>& ids) const;
+
+    // Forward that appends K/V to the cache and attends over the full cache, so a prefill
+    // chunk followed by single-token steps reproduces the full forward.
+    [[nodiscard]] Tensor forward_with_cache(const std::vector<int64_t>& ids, KVCache& cache) const;
 
     [[nodiscard]] const ModelConfig& config() const noexcept { return config_; }
 

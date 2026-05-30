@@ -29,13 +29,15 @@ void rope_inplace(Tensor& x,
                   double theta,
                   const std::vector<int64_t>& positions);
 
-// Causal grouped-query attention. q[S, n_heads*head_dim], k/v[S, n_kv_heads*head_dim]
-// -> [S, n_heads*head_dim]. Scale is 1/sqrt(head_dim); softmax in fp64.
+// Causal grouped-query attention. q[q_len, n_heads*head_dim] attends to k/v of
+// total >= query_offset + q_len rows ([total, n_kv_heads*head_dim]); query row i is
+// at absolute position query_offset + i. Scale 1/sqrt(head_dim); softmax in fp64.
 [[nodiscard]] Tensor attention(const Tensor& q,
                                const Tensor& k,
                                const Tensor& v,
                                int64_t n_heads,
                                int64_t n_kv_heads,
-                               int64_t head_dim);
+                               int64_t head_dim,
+                               int64_t query_offset = 0);
 
 } // namespace engine

@@ -153,37 +153,43 @@ Tensor attention(const Tensor& q,
                  const Tensor& v,
                  int64_t n_heads,
                  int64_t n_kv_heads,
-                 int64_t head_dim) {
-    const int64_t s = q.dim(0);
+                 int64_t head_dim,
+                 int64_t query_offset) {
+    const int64_t q_len = q.dim(0);
+    const int64_t total = k.dim(0); // cached key/value rows (>= query_offset + q_len)
     if (q.dim(1) != n_heads * head_dim) {
-        throw std::invalid_argument("attention: q must be [S, n_heads*head_dim]");
+        throw std::invalid_argument("attention: q must be [q_len, n_heads*head_dim]");
     }
-    if (k.dim(0) != s || v.dim(0) != s || k.dim(1) != n_kv_heads * head_dim ||
+    if (v.dim(0) != total || k.dim(1) != n_kv_heads * head_dim ||
         v.dim(1) != n_kv_heads * head_dim) {
         throw std::invalid_argument("attention: k/v shape mismatch");
     }
     if (n_kv_heads == 0 || n_heads % n_kv_heads != 0) {
         throw std::invalid_argument("attention: n_heads must be a multiple of n_kv_heads");
     }
+    if (query_offset < 0 || query_offset + q_len > total) {
+        throw std::invalid_argument("attention: query_offset + q_len exceeds key length");
+    }
 
     const int64_t group = n_heads / n_kv_heads;
     const double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
-    Tensor out({s, n_heads * head_dim});
+    Tensor out({q_len, n_heads * head_dim});
 
     const float* qp = q.data();
     const float* kp = k.data();
     const float* vp = v.data();
     float* op = out.data();
 
-    std::vector<double> scores(static_cast<std::size_t>(s));
+    std::vector<double> scores(static_cast<std::size_t>(total));
     std::vector<double> acc(static_cast<std::size_t>(head_dim));
 
     for (int64_t h = 0; h < n_heads; ++h) {
         const int64_t kvh = h / group;
-        for (int64_t i = 0; i < s; ++i) { // query position; causal -> keys 0..i
+        for (int64_t i = 0; i < q_len; ++i) {
+            const int64_t last = query_offset + i; // causal: attend keys 0..last
             const float* qvec = qp + i * n_heads * head_dim + h * head_dim;
             double max_score = -std::numeric_limits<double>::infinity();
-            for (int64_t j = 0; j <= i; ++j) {
+            for (int64_t j = 0; j <= last; ++j) {
                 const float* kvec = kp + j * n_kv_heads * head_dim + kvh * head_dim;
                 double dot = 0.0;
                 for (int64_t d = 0; d < head_dim; ++d) {
@@ -194,7 +200,7 @@ Tensor attention(const Tensor& q,
                 max_score = std::max(max_score, dot);
             }
             double sum = 0.0;
-            for (int64_t j = 0; j <= i; ++j) {
+            for (int64_t j = 0; j <= last; ++j) {
                 const double e = std::exp(scores[static_cast<std::size_t>(j)] - max_score);
                 scores[static_cast<std::size_t>(j)] = e;
                 sum += e;
@@ -203,7 +209,7 @@ Tensor attention(const Tensor& q,
                 acc[static_cast<std::size_t>(d)] = 0.0;
             }
             const double inv_sum = 1.0 / sum;
-            for (int64_t j = 0; j <= i; ++j) {
+            for (int64_t j = 0; j <= last; ++j) {
                 const double p = scores[static_cast<std::size_t>(j)] * inv_sum;
                 const float* vvec = vp + j * n_kv_heads * head_dim + kvh * head_dim;
                 for (int64_t d = 0; d < head_dim; ++d) {
