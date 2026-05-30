@@ -35,7 +35,7 @@ add_executable(engine_tests
     test_continuous_batch.cpp
     test_engine.cpp)
 if(ENGINE_ENABLE_CUDA)
-    target_sources(engine_tests PRIVATE test_cuda_smoke.cpp)
+    target_sources(engine_tests PRIVATE test_cuda_smoke.cpp test_cuda_kernels.cpp)
 endif()
 
 target_link_libraries(engine_tests PRIVATE engine_core GTest::gtest_main)
