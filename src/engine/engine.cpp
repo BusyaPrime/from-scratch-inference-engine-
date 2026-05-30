@@ -85,7 +85,8 @@ void Engine::step() {
             EngineSequence& seq = sequences_.at(id);
             // Share a cached prompt prefix once, when a running sequence first needs blocks (capped
             // to leave at least one token so the forward still yields logits). Only running
-            // sequences acquire, so a sequence that cannot be batched this step never strands blocks.
+            // sequences acquire, so a sequence that cannot be batched this step never strands
+            // blocks.
             if (prefix_cache_ && !seq.prefilled && seq.blocks.block_table.empty()) {
                 std::vector<int64_t> ctx = seq.request.prompt;
                 ctx.insert(ctx.end(), seq.output.begin(), seq.output.end());
