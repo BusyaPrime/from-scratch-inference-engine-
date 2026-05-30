@@ -24,8 +24,8 @@ inline engine::Tensor random_tensor(std::vector<int64_t> shape, std::mt19937& rn
     return t;
 }
 
-// A tiny Qwen2-family model with deterministic random weights, built entirely in memory.
-inline engine::Model tiny_model() {
+// Config for a tiny Qwen2-family model.
+inline engine::ModelConfig tiny_config() {
     engine::ModelConfig c;
     c.model_type = "qwen2";
     c.hidden_size = 8;
@@ -39,7 +39,12 @@ inline engine::Model tiny_model() {
     c.rms_norm_eps = 1e-6;
     c.attention_qkv_bias = true;
     c.tie_word_embeddings = true;
+    return c;
+}
 
+// Deterministic random weights for the tiny model (seeded; identical across calls).
+inline std::unordered_map<std::string, engine::Tensor> tiny_weights() {
+    const engine::ModelConfig c = tiny_config();
     const int64_t H = c.hidden_size;
     const int64_t NQ = c.num_attention_heads * c.head_dim;
     const int64_t NKV = c.num_key_value_heads * c.head_dim;
@@ -64,7 +69,13 @@ inline engine::Model tiny_model() {
         w[p + "mlp.up_proj.weight"] = random_tensor({I, H}, rng);
         w[p + "mlp.down_proj.weight"] = random_tensor({H, I}, rng);
     }
-    return engine::Model::from_safetensors(c, engine::SafeTensors::from_tensors(std::move(w)));
+    return w;
+}
+
+// A tiny Qwen2-family model with deterministic random weights, built entirely in memory.
+inline engine::Model tiny_model() {
+    return engine::Model::from_safetensors(tiny_config(),
+                                           engine::SafeTensors::from_tensors(tiny_weights()));
 }
 
 } // namespace tiny
