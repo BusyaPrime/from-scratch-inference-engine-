@@ -134,8 +134,18 @@ struct CudaModel::Impl {
     [[nodiscard]] Tensor forward(const std::vector<int64_t>& ids) const;
     [[nodiscard]] Tensor forward_cached(const std::vector<int64_t>& ids, GpuKVCache& cache) const;
     [[nodiscard]] Tensor forward_batch(const std::vector<GpuBatchItem>& items) const;
+    [[nodiscard]] std::vector<int64_t>
+    forward_batch_argmax(const std::vector<GpuBatchItem>& items) const;
     [[nodiscard]] Tensor forward_batch_paged(GpuBlockManager& manager,
                                              const std::vector<PagedBatchItem>& items) const;
+    // The shared batched-forward body, leaving the next-token logits on the device. The host-copy
+    // and device-argmax tails build on this so neither duplicates the layer stack.
+    [[nodiscard]] DeviceArray<float> forward_batch_device(
+        const std::vector<std::vector<int64_t>>& token_lists,
+        const std::vector<int64_t>& pasts,
+        const std::function<void(
+            int64_t, int64_t, int64_t, int64_t, const float*, const float*, const float*, float*)>&
+            attend) const;
     [[nodiscard]] Tensor forward_batch_impl(
         const std::vector<std::vector<int64_t>>& token_lists,
         const std::vector<int64_t>& pasts,
@@ -312,7 +322,7 @@ Tensor CudaModel::Impl::forward(const std::vector<int64_t>& ids) const {
     return forward_cached(ids, cache);
 }
 
-Tensor CudaModel::Impl::forward_batch_impl(
+DeviceArray<float> CudaModel::Impl::forward_batch_device(
     const std::vector<std::vector<int64_t>>& token_lists,
     const std::vector<int64_t>& pasts,
     const std::function<
@@ -495,7 +505,18 @@ Tensor CudaModel::Impl::forward_batch_impl(
     DeviceArray<float> d_logits(num_items * vocab);
     kernels::linear(
         handle, d_last.get(), lm_head, nullptr, d_logits.get(), num_items, hidden, vocab);
+    return d_logits;
+}
 
+Tensor CudaModel::Impl::forward_batch_impl(
+    const std::vector<std::vector<int64_t>>& token_lists,
+    const std::vector<int64_t>& pasts,
+    const std::function<
+        void(int64_t, int64_t, int64_t, int64_t, const float*, const float*, const float*, float*)>&
+        attend) const {
+    DeviceArray<float> d_logits = forward_batch_device(token_lists, pasts, attend);
+    const auto num_items = static_cast<int64_t>(token_lists.size());
+    const int64_t vocab = config.vocab_size;
     cuda_check(cudaDeviceSynchronize(), "synchronize");
     Tensor out({num_items, vocab});
     cuda_check(cudaMemcpy(out.data(),
@@ -547,6 +568,60 @@ Tensor CudaModel::Impl::forward_batch(const std::vector<GpuBatchItem>& items) co
         item.cache->advance(static_cast<int64_t>(item.tokens.size()));
     }
     return out;
+}
+
+std::vector<int64_t>
+CudaModel::Impl::forward_batch_argmax(const std::vector<GpuBatchItem>& items) const {
+    const ModelConfig& c = config;
+    std::vector<std::vector<int64_t>> token_lists;
+    std::vector<int64_t> pasts;
+    token_lists.reserve(items.size());
+    pasts.reserve(items.size());
+    for (const GpuBatchItem& item : items) {
+        if (item.cache == nullptr) {
+            throw std::invalid_argument("CudaModel::forward_batch_argmax: null cache");
+        }
+        token_lists.push_back(item.tokens);
+        pasts.push_back(item.cache->length());
+    }
+
+    const auto attend = [&](int64_t layer,
+                            int64_t i,
+                            int64_t len,
+                            int64_t past,
+                            const float* q,
+                            const float* k,
+                            const float* v,
+                            float* attn) {
+        GpuKVCache& cache = *items[static_cast<std::size_t>(i)].cache;
+        cache.append(layer, k, v, len);
+        kernels::attention(q,
+                           cache.key_ptr(layer),
+                           cache.value_ptr(layer),
+                           attn,
+                           len,
+                           past + len,
+                           c.num_attention_heads,
+                           c.num_key_value_heads,
+                           c.head_dim,
+                           past);
+    };
+
+    DeviceArray<float> d_logits = forward_batch_device(token_lists, pasts, attend);
+    const auto num_items = static_cast<int64_t>(items.size());
+    DeviceArray<int64_t> d_tokens(num_items);
+    kernels::argmax(d_logits.get(), d_tokens.get(), num_items, c.vocab_size);
+    cuda_check(cudaDeviceSynchronize(), "synchronize");
+    std::vector<int64_t> tokens(static_cast<std::size_t>(num_items));
+    cuda_check(cudaMemcpy(tokens.data(),
+                          d_tokens.get(),
+                          static_cast<std::size_t>(num_items) * sizeof(int64_t),
+                          cudaMemcpyDeviceToHost),
+               "copy tokens");
+    for (const GpuBatchItem& item : items) {
+        item.cache->advance(static_cast<int64_t>(item.tokens.size()));
+    }
+    return tokens;
 }
 
 Tensor CudaModel::Impl::forward_batch_paged(GpuBlockManager& manager,
@@ -624,6 +699,10 @@ Tensor CudaModel::forward_with_cache(const std::vector<int64_t>& ids, GpuKVCache
 
 Tensor CudaModel::forward_batch(const std::vector<GpuBatchItem>& items) const {
     return impl_->forward_batch(items);
+}
+
+std::vector<int64_t> CudaModel::forward_batch_argmax(const std::vector<GpuBatchItem>& items) const {
+    return impl_->forward_batch_argmax(items);
 }
 
 Tensor CudaModel::forward_batch_paged(GpuBlockManager& manager,

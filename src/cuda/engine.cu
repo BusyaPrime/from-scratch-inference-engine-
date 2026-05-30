@@ -68,14 +68,33 @@ void CudaEngine::Impl::step() {
         return;
     }
 
-    const Tensor logits = model.forward_batch(items);
-    const int64_t vocab = c.vocab_size;
+    // Pick each item's next token. An all-greedy batch reduces on the device and copies back only
+    // the chosen ids; if any item samples stochastically, copy the logits and sample on the host.
+    std::vector<int64_t> tokens;
+    bool all_greedy = true;
+    for (const int64_t id : batched_ids) {
+        if (sequences.at(id).request.params.temperature > 0.0) {
+            all_greedy = false;
+            break;
+        }
+    }
+    if (all_greedy) {
+        tokens = model.forward_batch_argmax(items);
+    } else {
+        const Tensor logits = model.forward_batch(items);
+        const int64_t vocab = c.vocab_size;
+        tokens.resize(batched_ids.size());
+        for (std::size_t k = 0; k < batched_ids.size(); ++k) {
+            tokens[k] = sampler.sample(logits.data() + static_cast<int64_t>(k) * vocab,
+                                       vocab,
+                                       sequences.at(batched_ids[k]).request.params);
+        }
+    }
 
     bool any_finished = false;
     for (std::size_t k = 0; k < batched_ids.size(); ++k) {
         Seq& seq = sequences.at(batched_ids[k]);
-        const int64_t token = sampler.sample(
-            logits.data() + static_cast<int64_t>(k) * vocab, vocab, seq.request.params);
+        const int64_t token = tokens[k];
         seq.prefilled = true;
         seq.output.push_back(token);
         const bool hit_eos = seq.request.eos_id >= 0 && token == seq.request.eos_id;

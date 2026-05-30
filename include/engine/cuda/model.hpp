@@ -62,6 +62,12 @@ public:
     // vocab_size].
     [[nodiscard]] Tensor forward_batch(const std::vector<GpuBatchItem>& items) const;
 
+    // Like forward_batch but the next token of each item is chosen by a device-side argmax, so only
+    // the chosen token ids (not the full [num_items, vocab] logits) are copied back to the host.
+    // Greedy only; use forward_batch when stochastic sampling is needed. Extends each item's cache.
+    [[nodiscard]] std::vector<int64_t>
+    forward_batch_argmax(const std::vector<GpuBatchItem>& items) const;
+
     // Same as forward_batch but over a shared paged pool (GpuBlockManager): true GPU
     // PagedAttention. Each item's K/V is scattered into its blocks, then gathered for attention.
     [[nodiscard]] Tensor forward_batch_paged(GpuBlockManager& manager,
