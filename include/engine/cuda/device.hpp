@@ -46,4 +46,18 @@ void linear(const float* x,
             int64_t in_dim,
             int64_t out_dim);
 
+// Causal grouped-query attention matching the CPU twin. q is [q_len, n_heads*head_dim], k and v
+// are [total, n_kv_heads*head_dim], out is [q_len, n_heads*head_dim]; query row i attends keys
+// 0..query_offset+i. Scores and the softmax are computed in double. head_dim must be <= 256.
+void attention(const float* q,
+               const float* k,
+               const float* v,
+               float* out,
+               int64_t q_len,
+               int64_t total,
+               int64_t n_heads,
+               int64_t n_kv_heads,
+               int64_t head_dim,
+               int64_t query_offset);
+
 } // namespace engine::cuda

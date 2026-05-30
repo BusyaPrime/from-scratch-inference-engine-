@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "engine/cuda/device.hpp"
 
+#include <cmath>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <stdexcept>
@@ -104,6 +105,63 @@ __global__ void rope_kernel(
     const float x2 = head[i + half];
     head[i] = static_cast<float>(static_cast<double>(x1) * c - static_cast<double>(x2) * s);
     head[i + half] = static_cast<float>(static_cast<double>(x2) * c + static_cast<double>(x1) * s);
+}
+
+// One thread per (head, query). Causal softmax-weighted sum over keys 0..query_offset+i, computed
+// in double with a single-pass online softmax (algebraically identical to the CPU two-pass).
+constexpr int kMaxHeadDim = 256;
+
+__global__ void attention_kernel(const float* q,
+                                 const float* k,
+                                 const float* v,
+                                 float* out,
+                                 int64_t q_len,
+                                 int64_t n_heads,
+                                 int64_t n_kv_heads,
+                                 int64_t head_dim,
+                                 int64_t query_offset,
+                                 double scale) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n_heads * q_len) {
+        return;
+    }
+    const int64_t h = idx / q_len;
+    const int64_t i = idx % q_len;
+    const int64_t group = n_heads / n_kv_heads;
+    const int64_t kvh = h / group;
+    const int64_t last = query_offset + i;
+    const float* qvec = q + i * n_heads * head_dim + h * head_dim;
+
+    double acc[kMaxHeadDim];
+    for (int64_t d = 0; d < head_dim; ++d) {
+        acc[d] = 0.0;
+    }
+    double running_max = -1.0e308;
+    double running_sum = 0.0;
+
+    for (int64_t j = 0; j <= last; ++j) {
+        const float* kvec = k + j * n_kv_heads * head_dim + kvh * head_dim;
+        double dot = 0.0;
+        for (int64_t d = 0; d < head_dim; ++d) {
+            dot += static_cast<double>(qvec[d]) * static_cast<double>(kvec[d]);
+        }
+        dot *= scale;
+        const double new_max = fmax(running_max, dot);
+        const double correction = exp(running_max - new_max);
+        const double weight = exp(dot - new_max);
+        running_sum = running_sum * correction + weight;
+        const float* vvec = v + j * n_kv_heads * head_dim + kvh * head_dim;
+        for (int64_t d = 0; d < head_dim; ++d) {
+            acc[d] = acc[d] * correction + weight * static_cast<double>(vvec[d]);
+        }
+        running_max = new_max;
+    }
+
+    const double inv_sum = 1.0 / running_sum;
+    float* ovec = out + i * n_heads * head_dim + h * head_dim;
+    for (int64_t d = 0; d < head_dim; ++d) {
+        ovec[d] = static_cast<float>(acc[d] * inv_sum);
+    }
 }
 
 } // namespace
@@ -293,6 +351,53 @@ void linear(const float* x,
     cudaFree(dw);
     cudaFree(dy);
     cudaFree(dbias);
+}
+
+void attention(const float* q,
+               const float* k,
+               const float* v,
+               float* out,
+               int64_t q_len,
+               int64_t total,
+               int64_t n_heads,
+               int64_t n_kv_heads,
+               int64_t head_dim,
+               int64_t query_offset) {
+    if (q_len <= 0 || total <= 0) {
+        return;
+    }
+    if (head_dim > kMaxHeadDim) {
+        throw std::runtime_error("cuda attention: head_dim exceeds supported maximum");
+    }
+    const int64_t q_dim = n_heads * head_dim;
+    const int64_t kv_dim = n_kv_heads * head_dim;
+    const auto q_bytes = sizeof(float) * static_cast<std::size_t>(q_len * q_dim);
+    const auto kv_bytes = sizeof(float) * static_cast<std::size_t>(total * kv_dim);
+    float* dq = nullptr;
+    float* dk = nullptr;
+    float* dv = nullptr;
+    float* dout = nullptr;
+    check(cudaMalloc(&dq, q_bytes), "malloc q");
+    check(cudaMalloc(&dk, kv_bytes), "malloc k");
+    check(cudaMalloc(&dv, kv_bytes), "malloc v");
+    check(cudaMalloc(&dout, q_bytes), "malloc out");
+    check(cudaMemcpy(dq, q, q_bytes, cudaMemcpyHostToDevice), "copy q");
+    check(cudaMemcpy(dk, k, kv_bytes, cudaMemcpyHostToDevice), "copy k");
+    check(cudaMemcpy(dv, v, kv_bytes, cudaMemcpyHostToDevice), "copy v");
+
+    const double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
+    const int64_t work = n_heads * q_len;
+    const int threads = 128;
+    const int blocks = static_cast<int>((work + threads - 1) / threads);
+    attention_kernel<<<blocks, threads>>>(
+        dq, dk, dv, dout, q_len, n_heads, n_kv_heads, head_dim, query_offset, scale);
+    check(cudaGetLastError(), "launch attention");
+    check(cudaMemcpy(out, dout, q_bytes, cudaMemcpyDeviceToHost), "copy out");
+
+    cudaFree(dq);
+    cudaFree(dk);
+    cudaFree(dv);
+    cudaFree(dout);
 }
 
 } // namespace engine::cuda

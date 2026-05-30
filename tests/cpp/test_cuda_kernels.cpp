@@ -120,3 +120,45 @@ TEST(CudaKernels, LinearWithBiasMatchesCpu) {
         EXPECT_NEAR(out[static_cast<std::size_t>(i)], reference.data()[i], 1e-3f) << "index " << i;
     }
 }
+
+namespace {
+
+void check_attention(int64_t q_len, int64_t total, int64_t query_offset, unsigned seed) {
+    std::mt19937 rng(seed);
+    const int64_t n_heads = 14;   // Qwen2.5-0.5B query heads
+    const int64_t n_kv_heads = 2; // grouped-query (group size 7)
+    const int64_t head_dim = 64;
+
+    const engine::Tensor q = random_tensor({q_len, n_heads * head_dim}, rng);
+    const engine::Tensor k = random_tensor({total, n_kv_heads * head_dim}, rng);
+    const engine::Tensor v = random_tensor({total, n_kv_heads * head_dim}, rng);
+    const engine::Tensor reference =
+        engine::attention(q, k, v, n_heads, n_kv_heads, head_dim, query_offset);
+
+    std::vector<float> out(static_cast<std::size_t>(q_len * n_heads * head_dim));
+    engine::cuda::attention(q.data(),
+                            k.data(),
+                            v.data(),
+                            out.data(),
+                            q_len,
+                            total,
+                            n_heads,
+                            n_kv_heads,
+                            head_dim,
+                            query_offset);
+
+    for (int64_t i = 0; i < q_len * n_heads * head_dim; ++i) {
+        EXPECT_NEAR(out[static_cast<std::size_t>(i)], reference.data()[i], 1e-4f) << "index " << i;
+    }
+}
+
+} // namespace
+
+// Causal grouped-query attention must match the CPU twin for a prefill chunk and a decode step.
+TEST(CudaKernels, AttentionPrefillMatchesCpu) {
+    check_attention(/*q_len=*/5, /*total=*/12, /*query_offset=*/7, /*seed=*/23);
+}
+
+TEST(CudaKernels, AttentionDecodeMatchesCpu) {
+    check_attention(/*q_len=*/1, /*total=*/20, /*query_offset=*/19, /*seed=*/29);
+}
