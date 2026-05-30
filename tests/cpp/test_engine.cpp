@@ -139,3 +139,25 @@ TEST(Engine, EosStopsGeneration) {
     EXPECT_EQ(got.back(), eos);
     EXPECT_EQ(got.size(), 1u); // first token is EOS, so generation stops immediately
 }
+
+// A request sharing a prompt prefix with an earlier one reuses the cached prefix blocks and still
+// produces the same tokens as a run with prefix caching disabled.
+TEST(Engine, PrefixCacheReusesSharedPromptAndMatches) {
+    const engine::Model model = tiny::tiny_model();
+    const std::vector<int64_t> pa = {1, 2, 3, 4, 5, 6};
+    const std::vector<int64_t> pb = {1, 2, 3, 4, 9, 8}; // shares the first two blocks (block_size 2)
+    const int64_t n = 5;
+
+    engine::Engine reference(model, /*block_size=*/2, /*num_blocks=*/256, /*seed=*/3,
+                             /*max_batch=*/256, /*enable_prefix_cache=*/false);
+    const std::vector<int64_t> ref_a = reference.generate(pa, greedy(), n);
+    const std::vector<int64_t> ref_b = reference.generate(pb, greedy(), n);
+
+    engine::Engine eng(model, 2, 256, 3, 256, /*enable_prefix_cache=*/true);
+    const std::vector<int64_t> got_a = eng.generate(pa, greedy(), n);
+    const std::vector<int64_t> got_b = eng.generate(pb, greedy(), n);
+
+    EXPECT_EQ(got_a, ref_a);
+    EXPECT_EQ(got_b, ref_b);
+    EXPECT_GT(eng.prefix_hits(), 0); // the second request reused the cached prefix
+}

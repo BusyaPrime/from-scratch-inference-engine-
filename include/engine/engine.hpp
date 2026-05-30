@@ -42,7 +42,8 @@ public:
            int64_t block_size,
            int64_t num_blocks,
            uint64_t seed,
-           int64_t max_batch = 256);
+           int64_t max_batch = 256,
+           bool enable_prefix_cache = true);
 
     // Queue a request; returns its sequence id.
     int64_t add_request(Request request);
@@ -60,6 +61,9 @@ public:
 
     // Total preemptions so far (a sequence evicted under memory pressure and later recomputed).
     [[nodiscard]] int64_t preemptions() const noexcept { return preemptions_; }
+
+    // Total sequences that reused at least one cached prompt-prefix block.
+    [[nodiscard]] int64_t prefix_hits() const noexcept { return manager_.prefix_hits(); }
 
     // Convenience: drive the engine until a single fresh request completes; returns its tokens.
     std::vector<int64_t> generate(const std::vector<int64_t>& prompt,
@@ -81,6 +85,7 @@ private:
     std::unordered_map<int64_t, EngineSequence> sequences_;
     int64_t next_id_ = 0;
     int64_t preemptions_ = 0;
+    bool prefix_cache_;
 };
 
 } // namespace engine
