@@ -41,7 +41,8 @@ add_library(engine_core STATIC
     src/core/matmul.cpp
     src/model/model_config.cpp
     src/model/safetensors.cpp
-    src/model/nn.cpp)
+    src/model/nn.cpp
+    src/model/model.cpp)
 target_include_directories(engine_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_include_directories(engine_core SYSTEM PRIVATE

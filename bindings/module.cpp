@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#include "engine/model.hpp"
 #include "engine/ops.hpp"
 #include "engine/tensor.hpp"
 #include "engine/version.hpp"
@@ -6,7 +7,9 @@
 #include <cstring>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace py = pybind11;
@@ -35,6 +38,17 @@ py::array_t<float> matmul_np(py::array_t<float, py::array::c_style | py::array::
     return out;
 }
 
+py::array_t<float> model_forward(const engine::Model& model, const std::vector<int64_t>& ids) {
+    const engine::Tensor logits = model.forward(ids);
+    const auto s = logits.dim(0);
+    const auto v = logits.dim(1);
+    py::array_t<float> out({s, v});
+    std::memcpy(out.mutable_data(),
+                logits.data(),
+                sizeof(float) * static_cast<std::size_t>(s) * static_cast<std::size_t>(v));
+    return out;
+}
+
 } // namespace
 
 PYBIND11_MODULE(engine_ext, m) {
@@ -44,4 +58,14 @@ PYBIND11_MODULE(engine_ext, m) {
         [] { return std::string(engine::version()); },
         "Version string reported by the engine core.");
     m.def("matmul", &matmul_np, "2D float32 matrix multiply (a @ b).");
+
+    py::class_<engine::Model>(m, "Model")
+        .def_static("from_pretrained",
+                    &engine::Model::from_pretrained,
+                    py::arg("model_dir"),
+                    "Load config.json + model.safetensors from a directory.")
+        .def("forward",
+             &model_forward,
+             py::arg("ids"),
+             "Forward a single sequence of token ids -> logits [seq_len, vocab_size].");
 }
