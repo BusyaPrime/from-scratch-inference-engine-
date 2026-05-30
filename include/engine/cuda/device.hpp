@@ -21,4 +21,8 @@ void saxpy(float a, const float* x, const float* y, float* out, int64_t n);
 void rms_norm(
     const float* x, const float* weight, float* out, int64_t rows, int64_t dim, double eps);
 
+// SwiGLU: out[i] = silu(gate[i]) * up[i] with silu(x) = x / (1 + exp(-x)), in float to match the
+// CPU twin. gate, up, and out are all length n.
+void silu_mul(const float* gate, const float* up, float* out, int64_t n);
+
 } // namespace engine::cuda

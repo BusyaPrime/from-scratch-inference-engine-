@@ -40,3 +40,20 @@ TEST(CudaKernels, RmsNormMatchesCpu) {
         EXPECT_NEAR(out[static_cast<std::size_t>(i)], reference.data()[i], 1e-4f) << "index " << i;
     }
 }
+
+// The GPU SwiGLU must match the CPU reference elementwise.
+TEST(CudaKernels, SiluMulMatchesCpu) {
+    std::mt19937 rng(11);
+    const int64_t n = 4864; // Qwen2.5-0.5B intermediate size
+
+    const engine::Tensor gate = random_tensor({n}, rng);
+    const engine::Tensor up = random_tensor({n}, rng);
+    const engine::Tensor reference = engine::silu_mul(gate, up);
+
+    std::vector<float> out(static_cast<std::size_t>(n));
+    engine::cuda::silu_mul(gate.data(), up.data(), out.data(), n);
+
+    for (int64_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(out[static_cast<std::size_t>(i)], reference.data()[i], 1e-4f) << "index " << i;
+    }
+}

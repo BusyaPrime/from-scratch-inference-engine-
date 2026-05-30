@@ -55,6 +55,14 @@ rms_norm_kernel(const float* x, const float* weight, float* out, int64_t dim, do
     }
 }
 
+__global__ void silu_mul_kernel(const float* gate, const float* up, float* out, int64_t n) {
+    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const float x = gate[i];
+        out[i] = (x / (1.0f + expf(-x))) * up[i];
+    }
+}
+
 } // namespace
 
 int device_count() {
@@ -114,6 +122,31 @@ void rms_norm(
 
     cudaFree(dx);
     cudaFree(dw);
+    cudaFree(dout);
+}
+
+void silu_mul(const float* gate, const float* up, float* out, int64_t n) {
+    if (n <= 0) {
+        return;
+    }
+    const auto bytes = sizeof(float) * static_cast<std::size_t>(n);
+    float* dgate = nullptr;
+    float* dup = nullptr;
+    float* dout = nullptr;
+    check(cudaMalloc(&dgate, bytes), "malloc gate");
+    check(cudaMalloc(&dup, bytes), "malloc up");
+    check(cudaMalloc(&dout, bytes), "malloc out");
+    check(cudaMemcpy(dgate, gate, bytes, cudaMemcpyHostToDevice), "copy gate");
+    check(cudaMemcpy(dup, up, bytes, cudaMemcpyHostToDevice), "copy up");
+
+    const int threads = 256;
+    const int blocks = static_cast<int>((n + threads - 1) / threads);
+    silu_mul_kernel<<<blocks, threads>>>(dgate, dup, dout, n);
+    check(cudaGetLastError(), "launch silu_mul");
+    check(cudaMemcpy(out, dout, bytes, cudaMemcpyDeviceToHost), "copy out");
+
+    cudaFree(dgate);
+    cudaFree(dup);
     cudaFree(dout);
 }
 
