@@ -43,7 +43,7 @@ public:
            int64_t num_blocks,
            uint64_t seed,
            int64_t max_batch = 256,
-           bool enable_prefix_cache = true);
+           bool enable_prefix_cache = false);
 
     // Queue a request; returns its sequence id.
     int64_t add_request(Request request);

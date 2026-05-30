@@ -57,19 +57,8 @@ void Engine::step() {
     while (!waiting_.empty() && static_cast<int64_t>(running_.size()) < max_batch_) {
         const int64_t id = waiting_.front();
         EngineSequence& seq = sequences_.at(id);
-        if (prefix_cache_ && !seq.prefilled && seq.blocks.block_table.empty()) {
-            std::vector<int64_t> ctx = seq.request.prompt;
-            ctx.insert(ctx.end(), seq.output.begin(), seq.output.end());
-            const int64_t bs = manager_.block_size();
-            const int64_t cap = ((static_cast<int64_t>(ctx.size()) - 1) / bs) * bs;
-            if (cap > 0) {
-                manager_.acquire_shared_prefix(
-                    seq.blocks, std::vector<int64_t>(ctx.begin(), ctx.begin() + cap));
-            }
-        }
-        const int64_t context_len =
-            static_cast<int64_t>(seq.request.prompt.size() + seq.output.size());
-        const int64_t need = seq.prefilled ? 1 : (context_len - seq.blocks.length);
+        const int64_t need =
+            seq.prefilled ? 1 : static_cast<int64_t>(seq.request.prompt.size() + seq.output.size());
         if (!manager_.can_append(seq.blocks, need)) {
             break;
         }
@@ -94,6 +83,19 @@ void Engine::step() {
         int64_t budget = manager_.free_blocks();
         for (const int64_t id : running_) {
             EngineSequence& seq = sequences_.at(id);
+            // Share a cached prompt prefix once, when a running sequence first needs blocks (capped
+            // to leave at least one token so the forward still yields logits). Only running
+            // sequences acquire, so a sequence that cannot be batched this step never strands blocks.
+            if (prefix_cache_ && !seq.prefilled && seq.blocks.block_table.empty()) {
+                std::vector<int64_t> ctx = seq.request.prompt;
+                ctx.insert(ctx.end(), seq.output.begin(), seq.output.end());
+                const int64_t bs = manager_.block_size();
+                const int64_t cap = ((static_cast<int64_t>(ctx.size()) - 1) / bs) * bs;
+                if (cap > 0) {
+                    manager_.acquire_shared_prefix(
+                        seq.blocks, std::vector<int64_t>(ctx.begin(), ctx.begin() + cap));
+                }
+            }
             std::vector<int64_t> tokens = step_tokens(seq);
             const auto need = static_cast<int64_t>(tokens.size());
             const auto have = static_cast<int64_t>(seq.blocks.block_table.size());
