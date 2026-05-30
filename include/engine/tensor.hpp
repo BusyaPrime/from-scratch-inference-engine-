@@ -12,7 +12,7 @@ namespace engine {
 // Product of a shape's dimensions (number of scalar elements).
 [[nodiscard]] inline int64_t num_elements(const std::vector<int64_t>& shape) noexcept {
     if (shape.empty()) {
-        return 0;  // a default/empty tensor holds no elements
+        return 0; // a default/empty tensor holds no elements
     }
     int64_t n = 1;
     for (const int64_t d : shape) {
