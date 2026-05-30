@@ -24,8 +24,15 @@ true GPU PagedAttention. Every kernel is checked against its CPU twin, and the f
 cached decode, batched forward, and paged forward all match the CPU path (and so, transitively,
 `transformers`). A comparison harness benchmarks the engine against the `transformers` reference;
 the `nano-vllm`/`vllm` head-to-head uses the same recipe on a Linux + CUDA host where they install
-cleanly. Still ahead: half precision and the Phase 5 stretch (speculative decoding, prefix caching,
-quantization).
+cleanly.
+
+The Phase 5 stretch is in too: prefix caching (shared prompt prefixes reuse KV blocks via reference
+counting), int8 weight-only quantization, speculative greedy decoding (draft/verify, proven to
+equal plain greedy), and tensor-parallel sharding (column- and row-parallel linear split with the
+all-gather/all-reduce combine). Three carry honest hardware caveats: speculative decoding needs a
+cheaper draft model for an actual speedup, quantization is a weight-only primitive pending an int8
+kernel, and tensor parallelism implements the sharding arithmetic — real cross-GPU execution needs
+more than one device. Still ahead: half precision on the GPU path.
 
 ## Benchmarks
 
