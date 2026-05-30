@@ -5,6 +5,7 @@
 #include "engine/tensor.hpp"
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace engine {
@@ -61,6 +62,24 @@ public:
     // Return all of a sequence's blocks to the pool and reset it.
     void free(SequenceBlocks& seq);
 
+    // --- Prefix caching ---
+    // Share the leading full blocks of `tokens` with previously registered prefixes: each matching
+    // block is appended to `seq` (reference-counted, not reallocated) and seq.length advances.
+    // Returns the number of shared tokens (a multiple of block_size). Only valid for a fresh
+    // sequence. Sharing is correct because identical tokens at identical positions yield identical
+    // K/V.
+    int64_t acquire_shared_prefix(SequenceBlocks& seq, const std::vector<int64_t>& tokens);
+
+    // Record `seq`'s full blocks (whose K/V cover `tokens`) so later sequences can share them.
+    // Registered blocks are kept live until clear_prefix_cache.
+    void register_prefix(const SequenceBlocks& seq, const std::vector<int64_t>& tokens);
+
+    // Release all cached prefix blocks back toward the pool (drops the cache's references).
+    void clear_prefix_cache();
+
+    // Number of sequences that reused at least one cached prefix block (for metrics/tests).
+    [[nodiscard]] int64_t prefix_hits() const noexcept { return prefix_hits_; }
+
 private:
     void write_one(std::vector<float>& store,
                    const SequenceBlocks& seq,
@@ -70,12 +89,23 @@ private:
     [[nodiscard]] Tensor
     gather_one(const std::vector<float>& store, const SequenceBlocks& seq, int64_t rows) const;
 
+    // A cached prefix block: the block's own tokens and its parent block's hash (for collision-safe
+    // matching), and the physical block holding the K/V.
+    struct PrefixEntry {
+        uint64_t parent;
+        std::vector<int64_t> tokens;
+        int64_t block;
+    };
+    [[nodiscard]] static uint64_t hash_block(uint64_t parent, const int64_t* tokens, int64_t n);
+
     int64_t num_layers_;
     int64_t kv_dim_;
     int64_t block_size_;
     BlockAllocator alloc_;
     std::vector<std::vector<float>> keys_;   // per layer: num_blocks * block_size * kv_dim
     std::vector<std::vector<float>> values_; // per layer: num_blocks * block_size * kv_dim
+    std::unordered_map<uint64_t, std::vector<PrefixEntry>> prefix_; // block hash -> entries
+    int64_t prefix_hits_ = 0;
 };
 
 } // namespace engine

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "engine/block_manager.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -89,6 +90,95 @@ void BlockManager::free(SequenceBlocks& seq) {
     }
     seq.block_table.clear();
     seq.length = 0;
+}
+
+uint64_t BlockManager::hash_block(uint64_t parent, const int64_t* tokens, int64_t n) {
+    // FNV-1a over the parent hash and the block's tokens. A collision only affects which bucket is
+    // probed; matches are confirmed by comparing the stored tokens, so correctness does not depend
+    // on the hash being collision-free.
+    uint64_t h = parent ^ 0xcbf29ce484222325ULL;
+    for (int64_t i = 0; i < n; ++i) {
+        const auto value = static_cast<uint64_t>(tokens[i]);
+        for (int shift = 0; shift < 64; shift += 8) {
+            h ^= (value >> shift) & 0xffULL;
+            h *= 0x100000001b3ULL;
+        }
+    }
+    return h;
+}
+
+int64_t BlockManager::acquire_shared_prefix(SequenceBlocks& seq,
+                                            const std::vector<int64_t>& tokens) {
+    if (!seq.block_table.empty() || seq.length != 0) {
+        return 0; // only meaningful for a fresh sequence
+    }
+    const int64_t full_blocks = static_cast<int64_t>(tokens.size()) / block_size_;
+    uint64_t parent = 0;
+    int64_t matched = 0;
+    for (int64_t b = 0; b < full_blocks; ++b) {
+        const int64_t* span = tokens.data() + b * block_size_;
+        const uint64_t h = hash_block(parent, span, block_size_);
+        const auto it = prefix_.find(h);
+        int64_t block = -1;
+        if (it != prefix_.end()) {
+            for (const PrefixEntry& entry : it->second) {
+                if (entry.parent == parent &&
+                    static_cast<int64_t>(entry.tokens.size()) == block_size_ &&
+                    std::equal(entry.tokens.begin(), entry.tokens.end(), span)) {
+                    block = entry.block;
+                    break;
+                }
+            }
+        }
+        if (block < 0) {
+            break; // first miss ends the shareable prefix
+        }
+        alloc_.incref(block);
+        seq.block_table.push_back(block);
+        parent = h;
+        matched += block_size_;
+    }
+    seq.length = matched;
+    if (matched > 0) {
+        ++prefix_hits_;
+    }
+    return matched;
+}
+
+void BlockManager::register_prefix(const SequenceBlocks& seq, const std::vector<int64_t>& tokens) {
+    const auto by_blocks = static_cast<int64_t>(seq.block_table.size());
+    const int64_t by_tokens = static_cast<int64_t>(tokens.size()) / block_size_;
+    const int64_t full_blocks = by_blocks < by_tokens ? by_blocks : by_tokens;
+    uint64_t parent = 0;
+    for (int64_t b = 0; b < full_blocks; ++b) {
+        const int64_t* span = tokens.data() + b * block_size_;
+        const uint64_t h = hash_block(parent, span, block_size_);
+        std::vector<PrefixEntry>& entries = prefix_[h];
+        bool exists = false;
+        for (const PrefixEntry& entry : entries) {
+            if (entry.parent == parent &&
+                static_cast<int64_t>(entry.tokens.size()) == block_size_ &&
+                std::equal(entry.tokens.begin(), entry.tokens.end(), span)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            const int64_t block = seq.block_table[static_cast<std::size_t>(b)];
+            alloc_.incref(block); // keep the cached block live independent of the owner
+            entries.push_back({parent, std::vector<int64_t>(span, span + block_size_), block});
+        }
+        parent = h;
+    }
+}
+
+void BlockManager::clear_prefix_cache() {
+    for (const auto& bucket : prefix_) {
+        for (const PrefixEntry& entry : bucket.second) {
+            alloc_.free(entry.block);
+        }
+    }
+    prefix_.clear();
 }
 
 } // namespace engine

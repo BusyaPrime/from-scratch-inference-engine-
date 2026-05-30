@@ -58,3 +58,50 @@ TEST(BlockManager, CanAppendRespectsBudget) {
     EXPECT_TRUE(m.can_append(s, 4));  // total 2 blocks, +1 over the held 1 -> fits in 1 free
     EXPECT_FALSE(m.can_append(s, 5)); // total 3 blocks, +2 over held 1 -> only 1 free
 }
+
+// A sequence sharing a prompt prefix with a registered one reuses its blocks (no new allocation)
+// and gathers identical K/V from them.
+TEST(BlockManager, PrefixCacheSharesIdenticalPrefixBlocks) {
+    engine::BlockManager m(/*num_layers=*/1, /*kv_dim=*/2, /*block_size=*/2, /*num_blocks=*/16);
+
+    engine::SequenceBlocks a;
+    m.reserve(a, 6);
+    std::vector<float> ak(12);
+    for (int i = 0; i < 12; ++i) {
+        ak[static_cast<std::size_t>(i)] = static_cast<float>(i);
+    }
+    m.write(a, 0, 0, ak.data(), ak.data(), 6);
+    m.commit(a, 6);
+    m.register_prefix(a, {1, 2, 3, 4, 5, 6});
+    const int64_t free_after_a = m.free_blocks();
+
+    engine::SequenceBlocks b;
+    const int64_t matched =
+        m.acquire_shared_prefix(b, {1, 2, 3, 4, 9, 9}); // first two blocks match
+    EXPECT_EQ(matched, 4);
+    EXPECT_EQ(b.block_table.size(), 2u);
+    EXPECT_EQ(b.length, 4);
+    EXPECT_EQ(m.free_blocks(), free_after_a); // shared, not allocated
+    EXPECT_EQ(m.prefix_hits(), 1);
+
+    const engine::Tensor ga = m.gather_keys(a, 0, 4);
+    const engine::Tensor gb = m.gather_keys(b, 0, 4);
+    for (int64_t i = 0; i < 4 * 2; ++i) {
+        EXPECT_FLOAT_EQ(gb.data()[i], ga.data()[i]);
+    }
+}
+
+TEST(BlockManager, ClearPrefixCacheReleasesBlocks) {
+    engine::BlockManager m(1, 2, 2, 8);
+    engine::SequenceBlocks a;
+    m.reserve(a, 4);
+    const std::vector<float> ak(8, 1.0f);
+    m.write(a, 0, 0, ak.data(), ak.data(), 4);
+    m.commit(a, 4);
+    m.register_prefix(a, {1, 2, 3, 4});
+
+    m.free(a); // owner releases, but the cache keeps the two prefix blocks live
+    EXPECT_LT(m.free_blocks(), 8);
+    m.clear_prefix_cache();
+    EXPECT_EQ(m.free_blocks(), 8); // now fully returned
+}
