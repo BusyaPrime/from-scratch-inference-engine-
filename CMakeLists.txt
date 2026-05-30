@@ -38,7 +38,6 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(engine_core STATIC
     src/core/version.cpp
-    src/core/dtype.cpp
     src/core/matmul.cpp
     src/model/model_config.cpp
     src/model/safetensors.cpp)

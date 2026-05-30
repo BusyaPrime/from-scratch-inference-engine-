@@ -22,6 +22,9 @@ py::array_t<float> matmul_np(py::array_t<float, py::array::c_style | py::array::
     const auto m = static_cast<int64_t>(a.shape(0));
     const auto k = static_cast<int64_t>(a.shape(1));
     const auto n = static_cast<int64_t>(b.shape(1));
+    if (k != static_cast<int64_t>(b.shape(0))) {
+        throw std::invalid_argument("matmul: inner dimensions disagree (a.cols != b.rows)");
+    }
 
     engine::Tensor at({m, k}, std::vector<float>(a.data(), a.data() + a.size()));
     engine::Tensor bt({k, n}, std::vector<float>(b.data(), b.data() + b.size()));

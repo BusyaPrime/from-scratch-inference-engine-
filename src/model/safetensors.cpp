@@ -14,14 +14,6 @@
 namespace engine {
 namespace {
 
-int64_t numel_of(const std::vector<int64_t>& shape) {
-    int64_t n = 1;
-    for (const int64_t d : shape) {
-        n *= d;
-    }
-    return n;
-}
-
 uint16_t little_endian_u16(const uint8_t* p) {
     return static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(static_cast<uint16_t>(p[1]) << 8);
 }
@@ -61,7 +53,7 @@ SafeTensors SafeTensors::parse(const uint8_t* data, std::size_t size) {
                 continue;
             }
             const auto& meta = item.value();
-            const std::string dtype = meta.at("dtype").get<std::string>();
+            const DType dtype = dtype_from_string(meta.at("dtype").get<std::string>());
             const auto shape = meta.at("shape").get<std::vector<int64_t>>();
             const auto& offsets = meta.at("data_offsets");
             const uint64_t begin = offsets.at(0).get<uint64_t>();
@@ -76,17 +68,8 @@ SafeTensors SafeTensors::parse(const uint8_t* data, std::size_t size) {
                 }
             }
 
-            uint64_t elem_size = 0;
-            if (dtype == "F32") {
-                elem_size = 4;
-            } else if (dtype == "F16" || dtype == "BF16") {
-                elem_size = 2;
-            } else {
-                throw std::runtime_error("safetensors: unsupported dtype '" + dtype + "' for " +
-                                         name);
-            }
-
-            const int64_t numel = numel_of(shape);
+            const int64_t numel = num_elements(shape);
+            const uint64_t elem_size = dtype_size(dtype);
             const uint64_t nbytes = end - begin;
             // Validate via division (never multiplies numel) so an overflowed/negative numel
             // cannot spuriously match, and validate before allocating the output buffer.
@@ -97,10 +80,10 @@ SafeTensors SafeTensors::parse(const uint8_t* data, std::size_t size) {
 
             const uint8_t* p = base + begin;
             std::vector<float> out(static_cast<std::size_t>(numel));
-            if (dtype == "F32") {
+            if (dtype == DType::F32) {
                 std::memcpy(out.data(), p, static_cast<std::size_t>(nbytes));
             } else {
-                const bool half = (dtype == "F16");
+                const bool half = (dtype == DType::F16);
                 for (int64_t i = 0; i < numel; ++i) {
                     const uint16_t bits = little_endian_u16(p + 2 * i);
                     out[static_cast<std::size_t>(i)] = half ? f16_to_f32(bits) : bf16_to_f32(bits);
@@ -147,15 +130,6 @@ const Tensor& SafeTensors::get(const std::string& name) const {
         throw std::runtime_error("safetensors: missing tensor '" + name + "'");
     }
     return it->second;
-}
-
-std::vector<std::string> SafeTensors::names() const {
-    std::vector<std::string> out;
-    out.reserve(tensors_.size());
-    for (const auto& kv : tensors_) {
-        out.push_back(kv.first);
-    }
-    return out;
 }
 
 } // namespace engine

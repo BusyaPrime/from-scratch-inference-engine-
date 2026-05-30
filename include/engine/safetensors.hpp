@@ -21,7 +21,6 @@ public:
     [[nodiscard]] bool contains(const std::string& name) const;
     [[nodiscard]] const Tensor& get(const std::string& name) const; // throws if absent
     [[nodiscard]] std::size_t size() const noexcept { return tensors_.size(); }
-    [[nodiscard]] std::vector<std::string> names() const;
 
 private:
     std::unordered_map<std::string, Tensor> tensors_;

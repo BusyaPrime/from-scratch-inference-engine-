@@ -126,6 +126,19 @@ TEST(ModelConfig, RejectsZeroAttentionHeads) {
     EXPECT_THROW((void)engine::ModelConfig::from_json(cfg), std::runtime_error);
 }
 
+TEST(ModelConfig, NonQwen2UsesAttentionBiasAndExplicitHeadDim) {
+    const std::string cfg = R"({
+        "model_type": "llama", "hidden_size": 2048, "num_hidden_layers": 16,
+        "num_attention_heads": 32, "num_key_value_heads": 8, "head_dim": 64,
+        "intermediate_size": 8192, "vocab_size": 128256, "attention_bias": false,
+        "rms_norm_eps": 1e-5
+    })";
+    const auto c = engine::ModelConfig::from_json(cfg);
+    EXPECT_EQ(c.head_dim, 64); // explicit, used as-is
+    EXPECT_EQ(c.num_key_value_heads, 8);
+    EXPECT_FALSE(c.attention_qkv_bias); // non-qwen2 follows attention_bias
+}
+
 TEST(SafeTensorsReal, LoadsQwenWeightsIfPresent) {
     const std::filesystem::path path = std::filesystem::path(ENGINE_SOURCE_DIR) / "weights" /
                                        "Qwen2.5-0.5B-Instruct" / "model.safetensors";
