@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
+#include "engine/engine.hpp"
 #include "engine/model.hpp"
 #include "engine/ops.hpp"
+#include "engine/sampler.hpp"
 #include "engine/tensor.hpp"
 #include "engine/version.hpp"
 
+#include <cstdint>
 #include <cstring>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace py = pybind11;
@@ -68,4 +72,67 @@ PYBIND11_MODULE(engine_ext, m) {
              &model_forward,
              py::arg("ids"),
              "Forward a single sequence of token ids -> logits [seq_len, vocab_size].");
+
+    py::class_<engine::SamplingParams>(m, "SamplingParams")
+        .def(py::init([](double temperature, int64_t top_k, double top_p) {
+                 engine::SamplingParams params;
+                 params.temperature = temperature;
+                 params.top_k = top_k;
+                 params.top_p = top_p;
+                 return params;
+             }),
+             py::arg("temperature") = 1.0,
+             py::arg("top_k") = 0,
+             py::arg("top_p") = 1.0,
+             "Sampling controls; temperature <= 0 selects greedy (argmax).")
+        .def_readwrite("temperature", &engine::SamplingParams::temperature)
+        .def_readwrite("top_k", &engine::SamplingParams::top_k)
+        .def_readwrite("top_p", &engine::SamplingParams::top_p);
+
+    py::enum_<engine::SeqStatus>(m, "SeqStatus")
+        .value("Waiting", engine::SeqStatus::Waiting)
+        .value("Running", engine::SeqStatus::Running)
+        .value("Finished", engine::SeqStatus::Finished);
+
+    // keep_alive<1, 2>: the referenced Model must outlive the Engine that borrows it.
+    py::class_<engine::Engine>(m, "Engine")
+        .def(py::init<const engine::Model&, int64_t, int64_t, uint64_t, int64_t>(),
+             py::arg("model"),
+             py::arg("block_size"),
+             py::arg("num_blocks"),
+             py::arg("seed") = 0,
+             py::arg("max_batch") = 256,
+             py::keep_alive<1, 2>(),
+             "Continuous-batching engine over a shared paged KV pool.")
+        .def(
+            "add_request",
+            [](engine::Engine& self,
+               std::vector<int64_t> prompt,
+               const engine::SamplingParams& params,
+               int64_t max_tokens,
+               int64_t eos_id) {
+                engine::Request request;
+                request.prompt = std::move(prompt);
+                request.params = params;
+                request.max_tokens = max_tokens;
+                request.eos_id = eos_id;
+                return self.add_request(std::move(request));
+            },
+            py::arg("prompt"),
+            py::arg("params") = engine::SamplingParams{},
+            py::arg("max_tokens") = 16,
+            py::arg("eos_id") = -1,
+            "Queue a request (prompt token ids); returns its sequence id.")
+        .def("step", &engine::Engine::step, "Run one batched scheduling step.")
+        .def("has_work", &engine::Engine::has_work)
+        .def("output", &engine::Engine::output, py::arg("id"))
+        .def("status", &engine::Engine::status, py::arg("id"))
+        .def("preemptions", &engine::Engine::preemptions)
+        .def("generate",
+             &engine::Engine::generate,
+             py::arg("prompt"),
+             py::arg("params"),
+             py::arg("max_tokens"),
+             py::arg("eos_id") = -1,
+             "Drive the engine until a single fresh request finishes; returns its token ids.");
 }
