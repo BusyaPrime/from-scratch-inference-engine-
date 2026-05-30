@@ -62,24 +62,17 @@ Tensor Model::forward(const std::vector<int64_t>& ids) const {
         Tensor normed =
             rms_norm(x, weights_.get(layer_key(l, "input_layernorm.weight")), c.rms_norm_eps);
 
-        Tensor q;
-        Tensor k;
-        Tensor v;
-        if (c.attention_qkv_bias) {
-            q = linear(normed,
-                       weights_.get(layer_key(l, "self_attn.q_proj.weight")),
-                       weights_.get(layer_key(l, "self_attn.q_proj.bias")));
-            k = linear(normed,
-                       weights_.get(layer_key(l, "self_attn.k_proj.weight")),
-                       weights_.get(layer_key(l, "self_attn.k_proj.bias")));
-            v = linear(normed,
-                       weights_.get(layer_key(l, "self_attn.v_proj.weight")),
-                       weights_.get(layer_key(l, "self_attn.v_proj.bias")));
-        } else {
-            q = linear(normed, weights_.get(layer_key(l, "self_attn.q_proj.weight")));
-            k = linear(normed, weights_.get(layer_key(l, "self_attn.k_proj.weight")));
-            v = linear(normed, weights_.get(layer_key(l, "self_attn.v_proj.weight")));
-        }
+        const auto project = [&](const std::string& name) {
+            const Tensor& weight = weights_.get(layer_key(l, "self_attn." + name + "_proj.weight"));
+            if (c.attention_qkv_bias) {
+                return linear(
+                    normed, weight, weights_.get(layer_key(l, "self_attn." + name + "_proj.bias")));
+            }
+            return linear(normed, weight);
+        };
+        Tensor q = project("q");
+        Tensor k = project("k");
+        Tensor v = project("v");
 
         rope_inplace(q, c.num_attention_heads, c.head_dim, c.rope_theta, positions);
         rope_inplace(k, c.num_key_value_heads, c.head_dim, c.rope_theta, positions);
