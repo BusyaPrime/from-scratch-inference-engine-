@@ -71,7 +71,12 @@ PYBIND11_MODULE(engine_ext, m) {
         .def("forward",
              &model_forward,
              py::arg("ids"),
-             "Forward a single sequence of token ids -> logits [seq_len, vocab_size].");
+             "Forward a single sequence of token ids -> logits [seq_len, vocab_size].")
+        .def("quantize",
+             &engine::Model::quantize,
+             "Switch per-layer projection weights to weight-only int8 in place; subsequent "
+             "forwards (including the serving engine) run the quantized matmuls.")
+        .def("is_quantized", &engine::Model::is_quantized);
 
     py::class_<engine::SamplingParams>(m, "SamplingParams")
         .def(py::init([](double temperature, int64_t top_k, double top_p) {

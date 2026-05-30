@@ -46,6 +46,42 @@ Model Model::from_pretrained(const std::string& model_dir) {
     return Model(std::move(config), std::move(weights));
 }
 
+void Model::quantize() {
+    const char* attn[] = {"q", "k", "v", "o"};
+    const char* mlp[] = {"gate", "up", "down"};
+    for (int64_t l = 0; l < config_.num_hidden_layers; ++l) {
+        for (const char* n : attn) {
+            const std::string key = layer_key(l, std::string("self_attn.") + n + "_proj.weight");
+            quant_.emplace(key, quantize_rowwise_int8(weights_.get(key)));
+        }
+        for (const char* n : mlp) {
+            const std::string key = layer_key(l, std::string("mlp.") + n + "_proj.weight");
+            quant_.emplace(key, quantize_rowwise_int8(weights_.get(key)));
+        }
+    }
+    quantized_ = true;
+}
+
+Tensor Model::linear_w(const Tensor& x, const std::string& weight_name) const {
+    if (quantized_) {
+        const auto it = quant_.find(weight_name);
+        if (it != quant_.end()) {
+            return linear_int8(x, it->second);
+        }
+    }
+    return linear(x, weights_.get(weight_name));
+}
+
+Tensor Model::linear_w(const Tensor& x, const std::string& weight_name, const Tensor& bias) const {
+    if (quantized_) {
+        const auto it = quant_.find(weight_name);
+        if (it != quant_.end()) {
+            return linear_int8(x, it->second, bias);
+        }
+    }
+    return linear(x, weights_.get(weight_name), bias);
+}
+
 Tensor Model::forward(const std::vector<int64_t>& ids) const {
     KVCache cache(config_.num_hidden_layers, config_.num_key_value_heads * config_.head_dim);
     return forward_with_cache(ids, cache);
@@ -73,12 +109,12 @@ Tensor Model::forward_cached(const std::vector<int64_t>& ids, Cache& cache) cons
             rms_norm(x, weights_.get(layer_key(l, "input_layernorm.weight")), c.rms_norm_eps);
 
         const auto project = [&](const std::string& name) {
-            const Tensor& weight = weights_.get(layer_key(l, "self_attn." + name + "_proj.weight"));
+            const std::string wkey = layer_key(l, "self_attn." + name + "_proj.weight");
             if (c.attention_qkv_bias) {
-                return linear(
-                    normed, weight, weights_.get(layer_key(l, "self_attn." + name + "_proj.bias")));
+                return linear_w(
+                    normed, wkey, weights_.get(layer_key(l, "self_attn." + name + "_proj.bias")));
             }
-            return linear(normed, weight);
+            return linear_w(normed, wkey);
         };
         Tensor q = project("q");
         Tensor k = project("k");
@@ -92,15 +128,15 @@ Tensor Model::forward_cached(const std::vector<int64_t>& ids, Cache& cache) cons
         const Tensor v_all = cache.value_tensor(l);
         Tensor attn = attention(
             q, k_all, v_all, c.num_attention_heads, c.num_key_value_heads, c.head_dim, past);
-        Tensor attn_out = linear(attn, weights_.get(layer_key(l, "self_attn.o_proj.weight")));
+        Tensor attn_out = linear_w(attn, layer_key(l, "self_attn.o_proj.weight"));
         add_inplace(x, attn_out);
 
         Tensor normed2 = rms_norm(
             x, weights_.get(layer_key(l, "post_attention_layernorm.weight")), c.rms_norm_eps);
-        Tensor gate = linear(normed2, weights_.get(layer_key(l, "mlp.gate_proj.weight")));
-        Tensor up = linear(normed2, weights_.get(layer_key(l, "mlp.up_proj.weight")));
+        Tensor gate = linear_w(normed2, layer_key(l, "mlp.gate_proj.weight"));
+        Tensor up = linear_w(normed2, layer_key(l, "mlp.up_proj.weight"));
         Tensor act = silu_mul(gate, up);
-        Tensor down = linear(act, weights_.get(layer_key(l, "mlp.down_proj.weight")));
+        Tensor down = linear_w(act, layer_key(l, "mlp.down_proj.weight"));
         add_inplace(x, down);
     }
     cache.advance(seq);
@@ -165,12 +201,12 @@ Tensor Model::forward_batch(BlockManager& manager, const std::vector<BatchItem>&
             rms_norm(x, weights_.get(layer_key(l, "input_layernorm.weight")), c.rms_norm_eps);
 
         const auto project = [&](const std::string& name) {
-            const Tensor& weight = weights_.get(layer_key(l, "self_attn." + name + "_proj.weight"));
+            const std::string wkey = layer_key(l, "self_attn." + name + "_proj.weight");
             if (c.attention_qkv_bias) {
-                return linear(
-                    normed, weight, weights_.get(layer_key(l, "self_attn." + name + "_proj.bias")));
+                return linear_w(
+                    normed, wkey, weights_.get(layer_key(l, "self_attn." + name + "_proj.bias")));
             }
-            return linear(normed, weight);
+            return linear_w(normed, wkey);
         };
         Tensor q = project("q"); // [T, nq_dim], one big GEMM across all items
         Tensor k = project("k"); // [T, nkv_dim]
@@ -210,15 +246,15 @@ Tensor Model::forward_batch(BlockManager& manager, const std::vector<BatchItem>&
                         sizeof(float) * static_cast<std::size_t>(len[si] * nq_dim));
         }
 
-        Tensor attn_out = linear(attn, weights_.get(layer_key(l, "self_attn.o_proj.weight")));
+        Tensor attn_out = linear_w(attn, layer_key(l, "self_attn.o_proj.weight"));
         add_inplace(x, attn_out);
 
         Tensor normed2 = rms_norm(
             x, weights_.get(layer_key(l, "post_attention_layernorm.weight")), c.rms_norm_eps);
-        Tensor gate = linear(normed2, weights_.get(layer_key(l, "mlp.gate_proj.weight")));
-        Tensor up = linear(normed2, weights_.get(layer_key(l, "mlp.up_proj.weight")));
+        Tensor gate = linear_w(normed2, layer_key(l, "mlp.gate_proj.weight"));
+        Tensor up = linear_w(normed2, layer_key(l, "mlp.up_proj.weight"));
         Tensor act = silu_mul(gate, up);
-        Tensor down = linear(act, weights_.get(layer_key(l, "mlp.down_proj.weight")));
+        Tensor down = linear_w(act, layer_key(l, "mlp.down_proj.weight"));
         add_inplace(x, down);
     }
 

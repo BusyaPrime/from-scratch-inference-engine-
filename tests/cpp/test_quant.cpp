@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+#include "engine/model.hpp"
 #include "engine/nn.hpp"
 #include "engine/quant.hpp"
 #include "engine/tensor.hpp"
+#include "tiny_model.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -77,4 +79,21 @@ TEST(Quant, Int8LinearWithBias) {
     const engine::Tensor got = engine::linear_int8(x, q, bias);
 
     EXPECT_LT(relative_l2(got, reference), 0.05);
+}
+
+// A quantized model runs its forward through int8 weight-only matmuls and still tracks the
+// fp32 logits. The default model stays exact, so fp32 parity is unaffected.
+TEST(Quant, QuantizedModelForwardTracksFp32) {
+    const std::vector<int64_t> ids = {1, 2, 3, 4, 5};
+    const engine::Model fp32 = tiny::tiny_model();
+    engine::Model quant = tiny::tiny_model();
+    EXPECT_FALSE(quant.is_quantized());
+    quant.quantize();
+    EXPECT_TRUE(quant.is_quantized());
+
+    const engine::Tensor reference = fp32.forward(ids);
+    const engine::Tensor got = quant.forward(ids);
+    ASSERT_EQ(got.dim(0), reference.dim(0));
+    ASSERT_EQ(got.dim(1), reference.dim(1));
+    EXPECT_LT(relative_l2(got, reference), 0.1); // weight-only int8 tracks the fp32 logits
 }
